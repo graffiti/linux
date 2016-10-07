@@ -5411,18 +5411,50 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 	}
 
 	if (tsicr & TSINTR_TT0) {
-		spin_lock(&adapter->tmreg_lock);
-		ts = timespec64_add(adapter->perout[0].start,
-				    adapter->perout[0].period);
-		/* u32 conversion of tv_sec is safe until y2106 */
-		wr32(E1000_TRGTTIML0, ts.tv_nsec);
-		wr32(E1000_TRGTTIMH0, (u32)ts.tv_sec);
-		tsauxc = rd32(E1000_TSAUXC);
-		tsauxc |= TSAUXC_EN_TT0;
-		wr32(E1000_TSAUXC, tsauxc);
-		adapter->perout[0].start = ts;
-		spin_unlock(&adapter->tmreg_lock);
-		ack |= TSINTR_TT0;
+		if (adapter->timer_enabled) {
+			/** i210 will not trigger a new alarm unless:
+			 * - TT0 is disabled
+			 * - the interrupt is acknowledged
+			 * - the new alarm time is programmed
+			 * - TT0 is enabled again
+			 **/
+			spin_lock(&adapter->tmreg_lock);
+			igb_tt0_timer_enable(adapter, false);
+			/* acknowledge interrupt */
+			wr32(E1000_TSICR, TSINTR_TT0);
+			igb_ptp_read_i210(adapter, &event.alarm_time);
+			spin_unlock(&adapter->tmreg_lock);
+
+			event.type = PTP_CLOCK_ALARM;
+			event.index = 0;
+			/* ptp_clock_event will return the next time to set */
+			ptp_clock_event(adapter->ptp_clock, &event);
+
+			spin_lock(&adapter->tmreg_lock);
+			if (timespec64_to_ns(&event.alarm_time) != 0) {
+				/* set new trigger time and then enable timer */
+				wr32(E1000_TRGTTIML0, event.alarm_time.tv_nsec);
+				wr32(E1000_TRGTTIMH0,
+				     (u32)event.alarm_time.tv_sec);
+				igb_tt0_timer_enable(adapter, true);
+			}
+			spin_unlock(&adapter->tmreg_lock);
+		} else {
+			/* this is a periodic output interrupt */
+			spin_lock(&adapter->tmreg_lock);
+			ts = timespec64_add(adapter->perout[0].start,
+					    adapter->perout[0].period);
+			/* u32 conversion of tv_sec is safe until y2106 */
+			wr32(E1000_TRGTTIML0, ts.tv_nsec);
+			wr32(E1000_TRGTTIMH0, (u32)ts.tv_sec);
+			tsauxc = rd32(E1000_TSAUXC);
+			tsauxc |= TSAUXC_EN_TT0;
+			wr32(E1000_TSAUXC, tsauxc);
+			adapter->perout[0].start = ts;
+			spin_unlock(&adapter->tmreg_lock);
+			ack |= TSINTR_TT0;
+		}
+
 	}
 
 	if (tsicr & TSINTR_TT1) {
@@ -5460,7 +5492,8 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 	}
 
 	/* acknowledge the interrupts */
-	wr32(E1000_TSICR, ack);
+	if (ack)
+		wr32(E1000_TSICR, ack);
 }
 
 static irqreturn_t igb_msix_other(int irq, void *data)

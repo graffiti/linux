@@ -345,6 +345,7 @@ struct hwmon_buff {
 
 #define IGB_N_EXTTS	2
 #define IGB_N_PEROUT	2
+#define IGB_N_ALARM	1
 #define IGB_N_SDP	4
 #define IGB_RETA_SIZE	128
 
@@ -463,6 +464,8 @@ struct igb_adapter {
 	int copper_tries;
 	struct e1000_info ei;
 	u16 eee_advert;
+
+	bool timer_enabled;
 };
 
 #define IGB_FLAG_HAS_MSI		(1 << 0)
@@ -541,6 +544,9 @@ void igb_ptp_rx_pktstamp(struct igb_q_vector *q_vector, unsigned char *va,
 int igb_ptp_set_ts_config(struct net_device *netdev, struct ifreq *ifr);
 int igb_ptp_get_ts_config(struct net_device *netdev, struct ifreq *ifr);
 void igb_set_flag_queue_pairs(struct igb_adapter *, const u32);
+void igb_tt0_timer_enable(struct igb_adapter *adapter, bool enable);
+void igb_ptp_read_i210(struct igb_adapter *adapter,
+		       struct timespec64 *ts);
 #ifdef CONFIG_IGB_HWMON
 void igb_sysfs_exit(struct igb_adapter *adapter);
 int igb_sysfs_init(struct igb_adapter *adapter);

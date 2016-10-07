@@ -19,6 +19,7 @@
 #include <linux/device.h>
 #include <linux/pci.h>
 #include <linux/ptp_classify.h>
+#include <linux/posix-timers.h>
 
 #include "igb.h"
 
@@ -116,8 +117,8 @@ static cycle_t igb_ptp_read_82580(const struct cyclecounter *cc)
 }
 
 /* SYSTIM read access for I210/I211 */
-static void igb_ptp_read_i210(struct igb_adapter *adapter,
-			      struct timespec64 *ts)
+void igb_ptp_read_i210(struct igb_adapter *adapter,
+		       struct timespec64 *ts)
 {
 	struct e1000_hw *hw = &adapter->hw;
 	u32 sec, nsec;
@@ -515,6 +516,9 @@ static int igb_ptp_feature_enable_i210(struct ptp_clock_info *ptp,
 		return 0;
 
 	case PTP_CLK_REQ_PEROUT:
+		/* cannot use perout 0 and timer at the same time */
+		if (igb->timer_enabled && (rq->perout.index == 0))
+			return -EBUSY;
 		if (on) {
 			pin = ptp_find_pin(igb->ptp_clock, PTP_PF_PEROUT,
 					   rq->perout.index);
@@ -1005,6 +1009,95 @@ int igb_ptp_set_ts_config(struct net_device *netdev, struct ifreq *ifr)
 		-EFAULT : 0;
 }
 
+/* tmreg_lock should be held for this call */
+void igb_tt0_timer_enable(struct igb_adapter *adapter, bool enable)
+{
+	u32 tsauxc, tsim;
+	struct e1000_hw *hw = &adapter->hw;
+
+	tsauxc = rd32(E1000_TSAUXC);
+	tsim = rd32(E1000_TSIM);
+
+	if (enable)	{
+		tsauxc |= TSAUXC_EN_TT0;
+		tsim |= TSINTR_TT0;
+		wr32(E1000_TSAUXC, tsauxc);
+		wr32(E1000_TSIM, tsim);
+	} else {
+		tsauxc &= ~TSAUXC_EN_TT0;
+		tsim &= ~TSINTR_TT0;
+		wr32(E1000_TSAUXC, tsauxc);
+		wr32(E1000_TSIM, tsim);
+	}
+}
+
+static int igb_ptp_timer_settime_i210(struct ptp_clock_info *ptp,
+				      struct timespec64 *ts)
+{
+	struct igb_adapter *igb =
+				container_of(ptp, struct igb_adapter, ptp_caps);
+	struct e1000_hw *hw = &igb->hw;
+	unsigned long irqsaveflags;
+
+	spin_lock_irqsave(&igb->tmreg_lock, irqsaveflags);
+
+	if (timespec64_to_ns(ts) == 0) {
+		/* disable timer */
+		igb_tt0_timer_enable(igb, false);
+	} else {
+		/* set trigger time and then enable timer */
+		wr32(E1000_TRGTTIML0, ts->tv_nsec);
+		wr32(E1000_TRGTTIMH0, (u32)ts->tv_sec);
+
+		igb_tt0_timer_enable(igb, true);
+	}
+
+	spin_unlock_irqrestore(&igb->tmreg_lock, irqsaveflags);
+
+	return 0;
+}
+
+int igb_ptp_timer_enable_i210(struct ptp_clock_info *ptp, bool enable)
+{
+	struct igb_adapter *igb =
+			container_of(ptp, struct igb_adapter, ptp_caps);
+	struct e1000_hw *hw = &igb->hw;
+	u32 tsauxc;
+	unsigned long flags;
+	bool periodic_output_enabled;
+
+	if (enable)	{
+		if (!igb->timer_enabled) {
+			spin_lock_irqsave(&igb->tmreg_lock, flags);
+			tsauxc = rd32(E1000_TSAUXC);
+			periodic_output_enabled = tsauxc &
+				(TSAUXC_EN_TT0 | TSAUXC_EN_CLK0 | TSAUXC_ST0);
+			spin_unlock_irqrestore(&igb->tmreg_lock, flags);
+
+			if (periodic_output_enabled) {
+				/* we share the TT0 with the periodic output
+				 * generator, and that is already enabled
+				 */
+				return -EBUSY;
+			}
+
+			igb->timer_enabled = true;
+			return 0;
+		}
+		/* timer is already enabled */
+		return -EINVAL;
+	} else {
+		if (!igb->timer_enabled)
+			return -EINVAL;
+
+		/* disable the timer */
+		igb_tt0_timer_enable(igb, false);
+		igb->timer_enabled = false;
+	}
+
+	return 0;
+}
+
 void igb_ptp_init(struct igb_adapter *adapter)
 {
 	struct e1000_hw *hw = &adapter->hw;
@@ -1062,6 +1155,7 @@ void igb_ptp_init(struct igb_adapter *adapter)
 		snprintf(adapter->ptp_caps.name, 16, "%pm", netdev->dev_addr);
 		adapter->ptp_caps.owner = THIS_MODULE;
 		adapter->ptp_caps.max_adj = 62499999;
+		adapter->ptp_caps.n_alarm = IGB_N_ALARM;
 		adapter->ptp_caps.n_ext_ts = IGB_N_EXTTS;
 		adapter->ptp_caps.n_per_out = IGB_N_PEROUT;
 		adapter->ptp_caps.n_pins = IGB_N_SDP;
@@ -1073,6 +1167,8 @@ void igb_ptp_init(struct igb_adapter *adapter)
 		adapter->ptp_caps.settime64 = igb_ptp_settime_i210;
 		adapter->ptp_caps.enable = igb_ptp_feature_enable_i210;
 		adapter->ptp_caps.verify = igb_ptp_verify_pin;
+		adapter->ptp_caps.timerenable = igb_ptp_timer_enable_i210;
+		adapter->ptp_caps.timersettime = igb_ptp_timer_settime_i210;
 		/* Enable the timer functions by clearing bit 31. */
 		wr32(E1000_TSAUXC, 0x0);
 		break;
