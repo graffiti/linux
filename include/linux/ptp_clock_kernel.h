@@ -110,6 +110,8 @@ struct ptp_clock_info {
 		      struct ptp_clock_request *request, int on);
 	int (*verify)(struct ptp_clock_info *ptp, unsigned int pin,
 		      enum ptp_pin_function func, unsigned int chan);
+	int (*timerenable)(struct ptp_clock_info *ptp, bool enable);
+	int (*timersettime)(struct ptp_clock_info *ptp, struct timespec64 *ts);
 };
 
 struct ptp_clock;
@@ -141,12 +143,14 @@ enum ptp_clock_events {
 };
 
 /**
- * struct ptp_clock_event - decribes a PTP hardware clock event
+ * struct ptp_clock_event - describes a PTP hardware clock event
  *
  * @type:  One of the ptp_clock_events enumeration values.
  * @index: Identifies the source of the event.
- * @timestamp: When the event occurred (%PTP_CLOCK_EXTTS only).
- * @pps_times: When the event occurred (%PTP_CLOCK_PPSUSR only).
+ * @timestamp: 	When the event occurred (%PTP_CLOCK_EXTTS only).
+ * @pps_times: 	When the event occurred (%PTP_CLOCK_PPSUSR only).
+ * @alarm_time:	When the event occurred, and on return the time for
+ * 		the next event (%PTP_CLOCK_ALARM only).
  */
 
 struct ptp_clock_event {
@@ -155,6 +159,7 @@ struct ptp_clock_event {
 	union {
 		u64 timestamp;
 		struct pps_event_time pps_times;
+		struct timespec64 alarm_time;
 	};
 };
 

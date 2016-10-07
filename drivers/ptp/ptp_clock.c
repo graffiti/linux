@@ -36,12 +36,64 @@
 #define PTP_PPS_EVENT PPS_CAPTUREASSERT
 #define PTP_PPS_MODE (PTP_PPS_DEFAULTS | PPS_CANWAIT | PPS_TSFMT_TSPEC)
 
+#define PTP_TIMER_MINIMUM_INTERVAL_NS 100000
+
 /* private globals */
 
 static dev_t ptp_devt;
 static struct class *ptp_class;
 
 static DEFINE_IDA(ptp_clocks_map);
+
+static void alarm_event(struct ptp_clock *ptp, struct ptp_clock_event *event)
+{
+	struct timerqueue_node *next;
+	struct k_itimer *kit;
+	s64 ns_now;
+	bool signal_failed_to_send;
+	unsigned long tq_lock_flags;
+
+	ns_now = timespec64_to_ns(&event->alarm_time);
+
+	spin_lock_irqsave(&ptp->tq_lock, tq_lock_flags);
+
+	next = timerqueue_getnext(&ptp->timerqueue);
+
+	while (next) {
+		if (next->expires.tv64 > ns_now)
+			break;
+
+		kit = container_of(next, struct k_itimer, it.real.timer.node);
+
+		signal_failed_to_send = posix_timer_event(kit, 0);
+
+		/* update the last one that has fired */
+		timerqueue_del(&ptp->timerqueue, &kit->it.real.timer.node);
+		if ((ktime_to_ns(kit->it.real.interval) != 0)
+				&& !signal_failed_to_send) {
+			/* this is a periodic timer, set the next fire time */
+			kit->it.real.timer.node.expires =
+					ktime_add(
+						kit->it.real.timer.node.expires,
+						  kit->it.real.interval);
+			timerqueue_add(&ptp->timerqueue,
+				       &kit->it.real.timer.node);
+		}
+
+		next = timerqueue_getnext(&ptp->timerqueue);
+	}
+
+	/* now set the event time to the next timer fire time */
+	next = timerqueue_getnext(&ptp->timerqueue);
+	if (next) {
+		event->alarm_time = ktime_to_timespec64(next->expires);
+	} else {
+		event->alarm_time.tv_sec = 0;
+		event->alarm_time.tv_nsec = 0;
+	}
+
+	spin_unlock_irqrestore(&ptp->tq_lock, tq_lock_flags);
+}
 
 /* time stamp event queue operations */
 
@@ -163,12 +215,142 @@ static int ptp_clock_adjtime(struct posix_clock *pc, struct timex *tx)
 	return err;
 }
 
+static int ptp_timer_create(struct posix_clock *pc, struct k_itimer *kit)
+{
+	struct ptp_clock *ptp = container_of(pc, struct ptp_clock, clock);
+	int err = 0;
+	unsigned long tq_lock_flags;
+
+	if (ptp->info->timerenable == 0)
+		return -EOPNOTSUPP;
+
+	spin_lock_irqsave(&ptp->tq_lock, tq_lock_flags);
+
+	if (ptp->number_of_timers == 0) {
+		/* hardware timer is disabled, enable it */
+		err = ptp->info->timerenable(ptp->info, true);
+	}
+
+	if (err == 0) {
+		timerqueue_init(&kit->it.real.timer.node);
+		ptp->number_of_timers++;
+	}
+
+	spin_unlock_irqrestore(&ptp->tq_lock, tq_lock_flags);
+
+	return err;
+}
+
+static int ptp_timer_delete(struct posix_clock *pc, struct k_itimer *kit)
+{
+	struct ptp_clock *ptp = container_of(pc, struct ptp_clock, clock);
+	int err = 0;
+	unsigned long tq_lock_flags;
+
+	if (ptp->info->timerenable == 0)
+		return -EOPNOTSUPP;
+
+	spin_lock_irqsave(&ptp->tq_lock, tq_lock_flags);
+
+	if (!RB_EMPTY_NODE(&kit->it.real.timer.node.node))
+		timerqueue_del(&ptp->timerqueue, &kit->it.real.timer.node);
+
+	ptp->number_of_timers--;
+
+	if (ptp->number_of_timers == 0) {
+		/* there are no more timers set on this device,
+		 * so we can disable the hardware timer
+		 */
+		err = ptp->info->timerenable(ptp->info, false);
+	}
+
+	spin_unlock_irqrestore(&ptp->tq_lock, tq_lock_flags);
+
+	return err;
+}
+
+static void ptp_timer_gettime(struct posix_clock *pc,
+			      struct k_itimer *kit,
+			      struct itimerspec *tsp)
+{
+	struct timespec time_now;
+
+	if (ptp_clock_gettime(pc, &time_now) != 0)
+		return;
+
+	tsp->it_interval = ktime_to_timespec(kit->it.real.interval);
+	tsp->it_value = timespec_sub(ktime_to_timespec(
+			kit->it.real.timer.node.expires), time_now);
+}
+
+
+static int ptp_timer_settime(struct posix_clock *pc,
+			     struct k_itimer *kit, int flags,
+			     struct itimerspec *tsp, struct itimerspec *old)
+{
+	struct ptp_clock *ptp = container_of(pc, struct ptp_clock, clock);
+	int err;
+	unsigned long tq_lock_flags;
+	struct timespec time_now;
+	ktime_t fire_time;
+	struct timerqueue_node *next;
+	struct timespec64 ts;
+
+	if (ptp->info->timersettime == 0)
+		return -EOPNOTSUPP;
+
+	if (old)
+		ptp_timer_gettime(pc, kit, old);
+
+	fire_time = timespec_to_ktime(tsp->it_value);
+
+	if ((fire_time.tv64 != 0) && !(flags & TIMER_ABSTIME)) {
+		err = ptp_clock_gettime(pc, &time_now);
+		if (err)
+			return err;
+		/* convert relative to absolute time */
+		fire_time = ktime_add(fire_time, timespec_to_ktime(time_now));
+	}
+
+	kit->it.real.interval = timespec_to_ktime(tsp->it_interval);
+
+	if ((ktime_to_ns(kit->it.real.interval) != 0)
+		&& (ktime_to_ns(kit->it.real.interval) < PTP_TIMER_MINIMUM_INTERVAL_NS))
+		kit->it.real.interval = ns_to_ktime(PTP_TIMER_MINIMUM_INTERVAL_NS);
+
+	spin_lock_irqsave(&ptp->tq_lock, tq_lock_flags);
+
+	kit->it.real.timer.node.expires = fire_time;
+
+	if (!RB_EMPTY_NODE(&kit->it.real.timer.node.node))
+		timerqueue_del(&ptp->timerqueue, &kit->it.real.timer.node);
+
+	if (fire_time.tv64 != 0)
+		timerqueue_add(&ptp->timerqueue, &kit->it.real.timer.node);
+
+	next = timerqueue_getnext(&ptp->timerqueue);
+
+	spin_unlock_irqrestore(&ptp->tq_lock, tq_lock_flags);
+
+	if (next)
+		ts = ktime_to_timespec64(next->expires);
+	else {
+		ts.tv_sec = 0;
+		ts.tv_nsec = 0;
+	}
+	return ptp->info->timersettime(ptp->info, &ts);
+}
+
 static struct posix_clock_operations ptp_clock_ops = {
 	.owner		= THIS_MODULE,
 	.clock_adjtime	= ptp_clock_adjtime,
 	.clock_gettime	= ptp_clock_gettime,
 	.clock_getres	= ptp_clock_getres,
 	.clock_settime	= ptp_clock_settime,
+	.timer_create	= ptp_timer_create,
+	.timer_delete	= ptp_timer_delete,
+	.timer_gettime	= ptp_timer_gettime,
+	.timer_settime	= ptp_timer_settime,
 	.ioctl		= ptp_ioctl,
 	.open		= ptp_open,
 	.poll		= ptp_poll,
@@ -217,6 +399,8 @@ struct ptp_clock *ptp_clock_register(struct ptp_clock_info *info,
 	mutex_init(&ptp->tsevq_mux);
 	mutex_init(&ptp->pincfg_mux);
 	init_waitqueue_head(&ptp->tsev_wq);
+	spin_lock_init(&ptp->tq_lock);
+	timerqueue_init_head(&ptp->timerqueue);
 
 	/* Create a new device in our class. */
 	ptp->dev = device_create(ptp_class, parent, ptp->devid, ptp,
@@ -293,6 +477,7 @@ void ptp_clock_event(struct ptp_clock *ptp, struct ptp_clock_event *event)
 	switch (event->type) {
 
 	case PTP_CLOCK_ALARM:
+		alarm_event(ptp, event);
 		break;
 
 	case PTP_CLOCK_EXTTS:
