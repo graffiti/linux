@@ -544,7 +544,7 @@ void igb_ptp_rx_pktstamp(struct igb_q_vector *q_vector, unsigned char *va,
 int igb_ptp_set_ts_config(struct net_device *netdev, struct ifreq *ifr);
 int igb_ptp_get_ts_config(struct net_device *netdev, struct ifreq *ifr);
 void igb_set_flag_queue_pairs(struct igb_adapter *, const u32);
-void igb_tt0_timer_enable(struct igb_adapter *adapter, bool enable);
+bool igb_tt0_timer_enable(struct igb_adapter *adapter, bool enable);
 void igb_ptp_read_i210(struct igb_adapter *adapter,
 		       struct timespec64 *ts);
 #ifdef CONFIG_IGB_HWMON

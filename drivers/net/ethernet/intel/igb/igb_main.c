@@ -5393,7 +5393,20 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 	struct e1000_hw *hw = &adapter->hw;
 	struct ptp_clock_event event;
 	struct timespec64 ts;
-	u32 ack = 0, tsauxc, sec, nsec, tsicr = rd32(E1000_TSICR);
+	u32 tsauxc, sec, nsec, tsicr;
+	bool wasEnabled = false;
+
+	//if a timer is set, we must temporarily disable it
+	//so that it doesn't immediately fire again when TSICR is read
+	if (adapter->timer_enabled)
+	{
+		spin_lock(&adapter->tmreg_lock);
+		wasEnabled = igb_tt0_timer_enable(adapter, false);
+		spin_unlock(&adapter->tmreg_lock);
+	}
+
+	//note, this read acknowledges the interrupt, as per 8.16.1 of the i210 datasheet
+	tsicr = rd32(E1000_TSICR);
 
 	if (tsicr & TSINTR_SYS_WRAP) {
 		event.type = PTP_CLOCK_PPS;
@@ -5401,27 +5414,18 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 			ptp_clock_event(adapter->ptp_clock, &event);
 		else
 			dev_err(&adapter->pdev->dev, "unexpected SYS WRAP");
-		ack |= TSINTR_SYS_WRAP;
 	}
 
 	if (tsicr & E1000_TSICR_TXTS) {
 		/* retrieve hardware timestamp */
 		schedule_work(&adapter->ptp_tx_work);
-		ack |= E1000_TSICR_TXTS;
 	}
 
-	if (tsicr & TSINTR_TT0) {
-		if (adapter->timer_enabled) {
-			/** i210 will not trigger a new alarm unless:
-			 * - TT0 is disabled
-			 * - the interrupt is acknowledged
-			 * - the new alarm time is programmed
-			 * - TT0 is enabled again
-			 **/
+	if (tsicr & TSINTR_TT0)
+	{
+		if (adapter->timer_enabled)
+		{
 			spin_lock(&adapter->tmreg_lock);
-			igb_tt0_timer_enable(adapter, false);
-			/* acknowledge interrupt */
-			wr32(E1000_TSICR, TSINTR_TT0);
 			igb_ptp_read_i210(adapter, &event.alarm_time);
 			spin_unlock(&adapter->tmreg_lock);
 
@@ -5439,7 +5443,8 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 				igb_tt0_timer_enable(adapter, true);
 			}
 			spin_unlock(&adapter->tmreg_lock);
-		} else {
+		} else
+		{
 			/* this is a periodic output interrupt */
 			spin_lock(&adapter->tmreg_lock);
 			ts = timespec64_add(adapter->perout[0].start,
@@ -5452,9 +5457,16 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 			wr32(E1000_TSAUXC, tsauxc);
 			adapter->perout[0].start = ts;
 			spin_unlock(&adapter->tmreg_lock);
-			ack |= TSINTR_TT0;
 		}
-
+	}
+	else
+	{
+		if (adapter->timer_enabled && wasEnabled)
+		{
+			spin_lock(&adapter->tmreg_lock);
+			igb_tt0_timer_enable(adapter, true);
+			spin_unlock(&adapter->tmreg_lock);
+		}
 	}
 
 	if (tsicr & TSINTR_TT1) {
@@ -5468,7 +5480,6 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 		wr32(E1000_TSAUXC, tsauxc);
 		adapter->perout[1].start = ts;
 		spin_unlock(&adapter->tmreg_lock);
-		ack |= TSINTR_TT1;
 	}
 
 	if (tsicr & TSINTR_AUTT0) {
@@ -5478,7 +5489,6 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 		event.index = 0;
 		event.timestamp = sec * 1000000000ULL + nsec;
 		ptp_clock_event(adapter->ptp_clock, &event);
-		ack |= TSINTR_AUTT0;
 	}
 
 	if (tsicr & TSINTR_AUTT1) {
@@ -5488,12 +5498,7 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 		event.index = 1;
 		event.timestamp = sec * 1000000000ULL + nsec;
 		ptp_clock_event(adapter->ptp_clock, &event);
-		ack |= TSINTR_AUTT1;
 	}
-
-	/* acknowledge the interrupts */
-	if (ack)
-		wr32(E1000_TSICR, ack);
 }
 
 static irqreturn_t igb_msix_other(int irq, void *data)

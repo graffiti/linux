@@ -1010,25 +1010,27 @@ int igb_ptp_set_ts_config(struct net_device *netdev, struct ifreq *ifr)
 }
 
 /* tmreg_lock should be held for this call */
-void igb_tt0_timer_enable(struct igb_adapter *adapter, bool enable)
+bool igb_tt0_timer_enable(struct igb_adapter *adapter, bool enable)
 {
-	u32 tsauxc, tsim;
+	u32 tsauxc;
 	struct e1000_hw *hw = &adapter->hw;
+	bool wasEnabled;
 
 	tsauxc = rd32(E1000_TSAUXC);
-	tsim = rd32(E1000_TSIM);
 
-	if (enable)	{
+	wasEnabled = (tsauxc & TSAUXC_EN_TT0);
+
+	if (enable)
+	{
 		tsauxc |= TSAUXC_EN_TT0;
-		tsim |= TSINTR_TT0;
 		wr32(E1000_TSAUXC, tsauxc);
-		wr32(E1000_TSIM, tsim);
-	} else {
+	} else
+	{
 		tsauxc &= ~TSAUXC_EN_TT0;
-		tsim &= ~TSINTR_TT0;
 		wr32(E1000_TSAUXC, tsauxc);
-		wr32(E1000_TSIM, tsim);
 	}
+
+	return wasEnabled;
 }
 
 static int igb_ptp_timer_settime_i210(struct ptp_clock_info *ptp,
@@ -1041,10 +1043,10 @@ static int igb_ptp_timer_settime_i210(struct ptp_clock_info *ptp,
 
 	spin_lock_irqsave(&igb->tmreg_lock, irqsaveflags);
 
-	if (timespec64_to_ns(ts) == 0) {
-		/* disable timer */
-		igb_tt0_timer_enable(igb, false);
-	} else {
+	igb_tt0_timer_enable(igb, false);
+
+	if (timespec64_to_ns(ts) != 0)
+	{
 		/* set trigger time and then enable timer */
 		wr32(E1000_TRGTTIML0, ts->tv_nsec);
 		wr32(E1000_TRGTTIMH0, (u32)ts->tv_sec);
@@ -1062,7 +1064,7 @@ int igb_ptp_timer_enable_i210(struct ptp_clock_info *ptp, bool enable)
 	struct igb_adapter *igb =
 			container_of(ptp, struct igb_adapter, ptp_caps);
 	struct e1000_hw *hw = &igb->hw;
-	u32 tsauxc;
+	u32 tsauxc, tsim;
 	unsigned long flags;
 	bool periodic_output_enabled;
 
@@ -1082,6 +1084,12 @@ int igb_ptp_timer_enable_i210(struct ptp_clock_info *ptp, bool enable)
 			}
 
 			igb->timer_enabled = true;
+
+			//enable interrupt
+			tsim = rd32(E1000_TSIM);
+			tsim |= TSINTR_TT0;
+			wr32(E1000_TSIM, tsim);
+
 			return 0;
 		}
 		/* timer is already enabled */
@@ -1093,6 +1101,10 @@ int igb_ptp_timer_enable_i210(struct ptp_clock_info *ptp, bool enable)
 		/* disable the timer */
 		igb_tt0_timer_enable(igb, false);
 		igb->timer_enabled = false;
+		//disable interrupt
+		tsim = rd32(E1000_TSIM);
+		tsim &= ~TSINTR_TT0;
+		wr32(E1000_TSIM, tsim);
 	}
 
 	return 0;
