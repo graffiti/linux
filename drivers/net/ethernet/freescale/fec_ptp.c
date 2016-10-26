@@ -48,6 +48,9 @@
 
 #include "fec.h"
 
+/* we have 4 channels which can be used for either timer, capture or trigger */
+#define FEC_TIMER_CHANNEL 1
+
 /* FEC 1588 register bits */
 #define FEC_T_CTRL_SLAVE                0x00002000
 #define FEC_T_CTRL_CAPTURE              0x00000800
@@ -91,6 +94,8 @@
 #define FEC_TCSR(n)		(0x608 + n * 0x08)
 #define FEC_TCCR(n)		(0x60C + n * 0x08)
 #define MAX_TIMER_CHANNEL	3
+#define FEC_TMODE_DISABLED	0x00
+#define FEC_TMODE_SOFTWARE	0x04
 #define FEC_TMODE_TOGGLE	0x05
 #define FEC_HIGH_PULSE		0x0F
 
@@ -105,7 +110,7 @@
  * @fep: the fec_enet_private structure handle
  * @enable: enable the channel pps output
  *
- * This function enble the PPS ouput on the timer channel.
+ * This function enables the PPS output on the timer channel.
  */
 static int fec_ptp_enable_pps(struct fec_enet_private *fep, uint enable)
 {
@@ -556,6 +561,138 @@ static void fec_time_keep(struct work_struct *work)
 	schedule_delayed_work(&fep->time_keep, HZ);
 }
 
+/* tm_reg lock must be held for this call */
+bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
+{
+	u32 val;
+	u64 time_now, nsShifted;
+
+	if(enable)
+	{
+		//set trigger time
+		time_now = timecounter_read(&fep->tc);
+
+		//printk(KERN_ALERT "fec_tc_enable: time now = %llu, tc->cycle_last = %llu, tc->nsec = %llu\n", time_now, fep->tc.cycle_last, fep->tc.nsec);
+
+		nsShifted = ns - ((fep->tc.nsec & fep->cc.mask) - fep->tc.cycle_last);
+
+		val = nsShifted & fep->cc.mask;
+		writel(val, fep->hwp + FEC_TCCR(FEC_TIMER_CHANNEL));
+
+		/* Compare channel setting. */
+		val = readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL));
+		//val |= (1 << FEC_T_TF_OFFSET);
+		val |= (1 << FEC_T_TIE_OFFSET);
+		val &= ~(1 << FEC_T_TDRE_OFFSET);
+		val &= ~(FEC_T_TMODE_MASK);
+		val |= (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET);
+		writel(val, fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL));
+
+		while( (readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL)) & FEC_T_TMODE_MASK) != (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET) )
+		{
+		}
+
+		if (ns!=0)
+		{
+			time_now = timecounter_read(&fep->tc);
+
+			if(time_now>ns)
+			{
+				//the event already passed
+				return false;
+			}
+		}
+		return true;
+	}
+	else
+	{
+		//disable
+		/* Compare channel setting. */
+		val = readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL));
+		val |= (1 << FEC_T_TF_OFFSET);
+		val &= ~(1 << FEC_T_TDRE_OFFSET);
+		val &= ~(1 << FEC_T_TIE_OFFSET);
+		val &= ~(FEC_T_TMODE_MASK);
+		writel(val, fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL));
+
+		while( (readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL)) & FEC_T_TMODE_MASK) != (FEC_TMODE_DISABLED << FEC_T_TMODE_OFFSET) )
+		{
+		}
+		while (readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL)) & FEC_T_TF_MASK)
+		{
+			writel(val, fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL));
+		}
+		return true;
+	}
+}
+
+static int fec_ptp_timer_settime(struct ptp_clock_info *ptp,
+				      struct timespec64 *ts)
+{
+	struct fec_enet_private *fep =
+		    container_of(ptp, struct fec_enet_private, ptp_caps);
+	s64 ns;
+	unsigned long irqsaveflags;
+	struct ptp_clock_event event;
+
+	//printk(KERN_ALERT "fec_ptp_timer_settime: ts %d:%d\n", (int)ts->tv_sec, ts->tv_nsec);
+
+	ns = timespec64_to_ns(ts);
+	mutex_lock(&fep->ptp_clk_mutex);
+	spin_lock_irqsave(&fep->tmreg_lock, irqsaveflags);
+
+	/* disable timer */
+	fec_tc_enable(fep, false, 0);
+
+	/* set trigger time and enable timer */
+	while ((ns !=0) && !fec_tc_enable(fep, true, ns))
+	{
+		event.type = PTP_CLOCK_ALARM;
+		event.index = 0;
+		/* ptp_clock_event will return the next time to set */
+		ptp_clock_event(fep->ptp_clock, &event);
+		ns = timespec64_to_ns(&event.alarm_time);
+	}
+
+	spin_unlock_irqrestore(&fep->tmreg_lock, irqsaveflags);
+	mutex_unlock(&fep->ptp_clk_mutex);
+	return 0;
+}
+
+int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
+{
+	struct fec_enet_private *fep =
+			    container_of(ptp, struct fec_enet_private, ptp_caps);
+	unsigned long flags;
+
+
+	if (enable)	{
+		if (!fep->timer_enabled) {
+			spin_lock_irqsave(&fep->tmreg_lock, flags);
+			fep->timer_enabled = true;
+			spin_unlock_irqrestore(&fep->tmreg_lock, flags);
+
+			//printk(KERN_ALERT "fec: timer enabled\n");
+			return 0;
+		}
+		/* timer is already enabled */
+		return -EINVAL;
+	} else {
+		if (!fep->timer_enabled)
+			return -EINVAL;
+
+		spin_lock_irqsave(&fep->tmreg_lock, flags);
+		/* disable timer */
+		fec_tc_enable(fep, false, 0);
+		fep->timer_enabled = false;
+		spin_unlock_irqrestore(&fep->tmreg_lock, flags);
+
+		//printk(KERN_ALERT "fec: timer disabled\n");
+	}
+
+	return 0;
+}
+
 /**
  * fec_ptp_init
  * @ndev: The FEC network adapter
@@ -584,9 +721,12 @@ void fec_ptp_init(struct platform_device *pdev)
 	fep->ptp_caps.gettime64 = fec_ptp_gettime;
 	fep->ptp_caps.settime64 = fec_ptp_settime;
 	fep->ptp_caps.enable = fec_ptp_enable;
+	fep->ptp_caps.timerenable = fec_ptp_timer_enable;
+	fep->ptp_caps.timersettime = fec_ptp_timer_settime;
 
 	fep->cycle_speed = clk_get_rate(fep->clk_ptp);
 	fep->ptp_inc = NSEC_PER_SEC / fep->cycle_speed;
+	fep->timer_enabled = false;
 
 	spin_lock_init(&fep->tmreg_lock);
 
@@ -601,6 +741,47 @@ void fec_ptp_init(struct platform_device *pdev)
 	}
 
 	schedule_delayed_work(&fep->time_keep, HZ);
+}
+
+uint fec_ptp_check_alarm_event(struct fec_enet_private *fep)
+{
+	u32 val;
+	struct ptp_clock_event event;
+	u64 ns;
+
+	val = readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL));
+
+	if (val & FEC_T_TF_MASK)
+	{
+		fec_tc_enable(fep, false, 0);
+
+		if (fep->timer_enabled)
+		{
+			event.alarm_time = ns_to_timespec64(timecounter_read(&fep->tc));
+			event.type = PTP_CLOCK_ALARM;
+			event.index = 0;
+
+			//printk(KERN_ALERT "fec_ptp_check_alarm_event: got timer int sending event ts %d:%d\n", (int)event.alarm_time.tv_sec, event.alarm_time.tv_nsec);
+
+			/* ptp_clock_event will return the next time to set */
+			ptp_clock_event(fep->ptp_clock, &event);
+
+			ns = timespec64_to_ns(&event.alarm_time);
+
+			/* set trigger time and enable timer */
+			while ((ns !=0) && !fec_tc_enable(fep, true, ns))
+			{
+				event.type = PTP_CLOCK_ALARM;
+				event.index = 0;
+				/* ptp_clock_event will return the next time to set */
+				ptp_clock_event(fep->ptp_clock, &event);
+				ns = timespec64_to_ns(&event.alarm_time);
+			}
+		}
+		return 1;
+	}
+
+	return 0;
 }
 
 /**
