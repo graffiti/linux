@@ -54,6 +54,11 @@ struct ptp_clock {
 	struct device_attribute *pin_dev_attr;
 	struct attribute **pin_attr;
 	struct attribute_group pin_attr_group;
+
+	struct timerqueue_head timerqueue;
+	spinlock_t tq_lock;
+	struct work_struct alarm_work;
+	int number_of_timers;
 };
 
 /*
