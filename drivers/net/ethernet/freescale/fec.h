@@ -458,6 +458,10 @@ struct fec_enet_priv_rx_q {
 	struct bufdesc	*cur_rx;
 };
 
+//the 9 'pins' are the 8 1588_EVENT_IN_X / 1588_EVENT_OUT_X signals
+//plus a virtual posix timer (alarm) event pin
+#define FEC_NB_SDP 9
+
 /* The FEC buffer descriptors track the ring buffers.  The rx_bd_base and
  * tx_bd_base always point to the base of the buffer descriptors.  The
  * cur_rx and cur_tx point to the currently available buffer.
@@ -559,6 +563,8 @@ struct fec_enet_private {
 	unsigned int next_counter;
 
 	bool timer_enabled;
+
+	struct ptp_pin_desc sdp_config[FEC_NB_SDP];
 };
 
 void fec_ptp_init(struct platform_device *pdev);

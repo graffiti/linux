@@ -90,6 +90,12 @@
 #define FEC_ATIME_INC		0x414
 #define FEC_TS_TIMESTAMP	0x418
 
+#define FEC_ATVR		FEC_ATIME
+#define FEC_ATCR		FEC_ATIME_CTRL
+#define FEC_ATINC		FEC_ATIME_INC
+#define FEC_ATSTMP		FEC_TS_TIMESTAMP
+#define FEC_ATPER		FEC_ATIME_EVT_PERIOD
+#define FEC_ATOFF		FEC_ATIME_EVT_OFFSET
 #define FEC_TGSR		0x604
 #define FEC_TCSR(n)		(0x608 + n * 0x08)
 #define FEC_TCCR(n)		(0x60C + n * 0x08)
@@ -404,6 +410,22 @@ static int fec_ptp_gettime(struct ptp_clock_info *ptp, struct timespec64 *ts)
 
 	spin_lock_irqsave(&adapter->tmreg_lock, flags);
 	ns = timecounter_read(&adapter->tc);
+
+
+	//kjt debug
+	printk(KERN_ALERT "fec: ATCR = %x\n", readl(adapter->hwp + FEC_ATCR));
+	printk(KERN_ALERT "fec: ATINC = %x\n", readl(adapter->hwp + FEC_ATINC));
+	printk(KERN_ALERT "fec: ATSTMP = %x\n", readl(adapter->hwp + FEC_ATSTMP));
+	printk(KERN_ALERT "fec: ATPER = %x\n", readl(adapter->hwp + FEC_ATPER));
+	printk(KERN_ALERT "fec: ATOFF = %x\n", readl(adapter->hwp + FEC_ATOFF));
+	printk(KERN_ALERT "fec: ENET_ECR = %x\n", readl(adapter->hwp + FEC_ECNTRL));
+
+	writel((u32)1<<11, adapter->hwp + FEC_ATCR);
+	printk(KERN_ALERT "fec: ATVR = %x\n", readl(adapter->hwp + FEC_ATVR));
+	//end kjt debug
+
+
+
 	spin_unlock_irqrestore(&adapter->tmreg_lock, flags);
 
 	*ts = ns_to_timespec64(ns);
@@ -462,14 +484,126 @@ static int fec_ptp_enable(struct ptp_clock_info *ptp,
 {
 	struct fec_enet_private *fep =
 	    container_of(ptp, struct fec_enet_private, ptp_caps);
-	int ret = 0;
+	int use_freq = 0, pin = -1;
+	struct timespec64 ts;
+	s64 ns;
 
-	if (rq->type == PTP_CLK_REQ_PPS) {
-		ret = fec_ptp_enable_pps(fep, on);
+	switch (rq->type)
+	{
+	case PTP_CLK_REQ_EXTTS:
+		if (on) {
+			pin = ptp_find_pin(fep->ptp_clock, PTP_PF_EXTTS,
+					rq->extts.index);
+			if (pin < 0)
+				return -EBUSY;
+		}
+/*		if (rq->extts.index == 1) {
+			tsauxc_mask = TSAUXC_EN_TS1;
+			tsim_mask = TSINTR_AUTT1;
+		} else {
+			tsauxc_mask = TSAUXC_EN_TS0;
+			tsim_mask = TSINTR_AUTT0;
+		}
+		spin_lock_irqsave(&igb->tmreg_lock, flags);
+		tsauxc = rd32(E1000_TSAUXC);
+		tsim = rd32(E1000_TSIM);
+		if (on) {
+			igb_pin_extts(igb, rq->extts.index, pin);
+			tsauxc |= tsauxc_mask;
+			tsim |= tsim_mask;
+		} else {
+			tsauxc &= ~tsauxc_mask;
+			tsim &= ~tsim_mask;
+		}
+		wr32(E1000_TSAUXC, tsauxc);
+		wr32(E1000_TSIM, tsim);
+		spin_unlock_irqrestore(&igb->tmreg_lock, flags);
+		*/
+		return 0;
 
-		return ret;
+	case PTP_CLK_REQ_PEROUT:
+		/* do we have a hardcoded timer channel? */
+		if (fep->timer_enabled && (rq->perout.index == FEC_TIMER_CHANNEL))
+			return -EBUSY;
+		if (on) {
+			pin = ptp_find_pin(fep->ptp_clock, PTP_PF_PEROUT,
+					rq->perout.index);
+			if (pin < 0)
+				return -EBUSY;
+		}
+		ts.tv_sec = rq->perout.period.sec;
+		ts.tv_nsec = rq->perout.period.nsec;
+		ns = timespec64_to_ns(&ts);
+		ns = ns >> 1;
+		if (on && ns <= 70000000LL) {
+			if (ns < 8LL)
+				return -EINVAL;
+			use_freq = 1;
+		}
+		ts = ns_to_timespec64(ns);
+/*		if (rq->perout.index == 1) {
+			if (use_freq) {
+				tsauxc_mask = TSAUXC_EN_CLK1 | TSAUXC_ST1;
+				tsim_mask = 0;
+			} else {
+				tsauxc_mask = TSAUXC_EN_TT1;
+				tsim_mask = TSINTR_TT1;
+			}
+			trgttiml = E1000_TRGTTIML1;
+			trgttimh = E1000_TRGTTIMH1;
+			freqout = E1000_FREQOUT1;
+		} else {
+			if (use_freq) {
+				tsauxc_mask = TSAUXC_EN_CLK0 | TSAUXC_ST0;
+				tsim_mask = 0;
+			} else {
+				tsauxc_mask = TSAUXC_EN_TT0;
+				tsim_mask = TSINTR_TT0;
+			}
+			trgttiml = E1000_TRGTTIML0;
+			trgttimh = E1000_TRGTTIMH0;
+			freqout = E1000_FREQOUT0;
+		}
+		spin_lock_irqsave(&igb->tmreg_lock, flags);
+		tsauxc = rd32(E1000_TSAUXC);
+		tsim = rd32(E1000_TSIM);
+		if (rq->perout.index == 1) {
+			tsauxc &= ~(TSAUXC_EN_TT1 | TSAUXC_EN_CLK1 | TSAUXC_ST1);
+			tsim &= ~TSINTR_TT1;
+		} else {
+			tsauxc &= ~(TSAUXC_EN_TT0 | TSAUXC_EN_CLK0 | TSAUXC_ST0);
+			tsim &= ~TSINTR_TT0;
+		}
+		if (on) {
+			int i = rq->perout.index;
+			igb_pin_perout(igb, i, pin, use_freq);
+			igb->perout[i].start.tv_sec = rq->perout.start.sec;
+			igb->perout[i].start.tv_nsec = rq->perout.start.nsec;
+			igb->perout[i].period.tv_sec = ts.tv_sec;
+			igb->perout[i].period.tv_nsec = ts.tv_nsec;
+			wr32(trgttimh, rq->perout.start.sec);
+			wr32(trgttiml, rq->perout.start.nsec);
+			if (use_freq)
+				wr32(freqout, ns);
+			tsauxc |= tsauxc_mask;
+			tsim |= tsim_mask;
+		}
+		wr32(E1000_TSAUXC, tsauxc);
+		wr32(E1000_TSIM, tsim);
+		spin_unlock_irqrestore(&igb->tmreg_lock, flags);
+		*/
+		return 0;
+
+	case PTP_CLK_REQ_PPS:
+		return fec_ptp_enable_pps(fep, on);
 	}
+
 	return -EOPNOTSUPP;
+
+
+
+
+
 }
 
 /**
@@ -566,9 +700,14 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 {
 	u32 val;
 	u64 time_now, nsShifted;
+	int tries = 0;
 
 	if(enable)
 	{
+		//first disable it
+		fec_tc_enable(fep, false, 0);
+
+
 		//set trigger time
 		time_now = timecounter_read(&fep->tc);
 
@@ -581,15 +720,21 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 
 		/* Compare channel setting. */
 		val = readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL));
-		//val |= (1 << FEC_T_TF_OFFSET);
+		val |= (1 << FEC_T_TF_OFFSET);
 		val |= (1 << FEC_T_TIE_OFFSET);
 		val &= ~(1 << FEC_T_TDRE_OFFSET);
 		val &= ~(FEC_T_TMODE_MASK);
 		val |= (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET);
 		writel(val, fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL));
 
-		while( (readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL)) & FEC_T_TMODE_MASK) != (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET) )
+		while( tries<100 && ((readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL)) & FEC_T_TMODE_MASK) != (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET)) )
 		{
+			writel(val, fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL));
+			tries++;
+		}
+		if(tries == 100)
+		{
+			printk(KERN_ALERT "TSCR stuck on %d writing %d try %d\n", readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL)), val, tries);
 		}
 
 		if (ns!=0)
@@ -617,10 +762,12 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 
 		while( (readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL)) & FEC_T_TMODE_MASK) != (FEC_TMODE_DISABLED << FEC_T_TMODE_OFFSET) )
 		{
+			printk(KERN_ALERT ".");
 		}
 		while (readl(fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL)) & FEC_T_TF_MASK)
 		{
 			writel(val, fep->hwp + FEC_TCSR(FEC_TIMER_CHANNEL));
+			printk(KERN_ALERT "-");
 		}
 		return true;
 	}
@@ -635,7 +782,7 @@ static int fec_ptp_timer_settime(struct ptp_clock_info *ptp,
 	unsigned long irqsaveflags;
 	struct ptp_clock_event event;
 
-	//printk(KERN_ALERT "fec_ptp_timer_settime: ts %d:%d\n", (int)ts->tv_sec, ts->tv_nsec);
+	printk(KERN_ALERT "fec_ptp_timer_settime: ts %d:%d\n", (int)ts->tv_sec, (int)ts->tv_nsec);
 
 	ns = timespec64_to_ns(ts);
 	mutex_lock(&fep->ptp_clk_mutex);
@@ -652,6 +799,8 @@ static int fec_ptp_timer_settime(struct ptp_clock_info *ptp,
 		/* ptp_clock_event will return the next time to set */
 		ptp_clock_event(fep->ptp_clock, &event);
 		ns = timespec64_to_ns(&event.alarm_time);
+
+		printk(KERN_ALERT "fec_ptp_timer_settime: time already passed, now setting to %llu\n", ns);
 	}
 
 	spin_unlock_irqrestore(&fep->tmreg_lock, irqsaveflags);
@@ -672,7 +821,7 @@ int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
 			fep->timer_enabled = true;
 			spin_unlock_irqrestore(&fep->tmreg_lock, flags);
 
-			//printk(KERN_ALERT "fec: timer enabled\n");
+			printk(KERN_ALERT "fec: timer enabled\n");
 			return 0;
 		}
 		/* timer is already enabled */
@@ -687,9 +836,23 @@ int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
 		fep->timer_enabled = false;
 		spin_unlock_irqrestore(&fep->tmreg_lock, flags);
 
-		//printk(KERN_ALERT "fec: timer disabled\n");
+		printk(KERN_ALERT "fec: timer disabled\n");
 	}
 
+	return 0;
+}
+
+static int fec_ptp_verify_pin(struct ptp_clock_info *ptp, unsigned int pin,
+			      enum ptp_pin_function func, unsigned int chan)
+{
+	switch (func) {
+	case PTP_PF_NONE:
+	case PTP_PF_EXTTS:
+	case PTP_PF_PEROUT:
+		break;
+	case PTP_PF_PHYSYNC:
+		return -1;
+	}
 	return 0;
 }
 
@@ -706,27 +869,50 @@ void fec_ptp_init(struct platform_device *pdev)
 {
 	struct net_device *ndev = platform_get_drvdata(pdev);
 	struct fec_enet_private *fep = netdev_priv(ndev);
+	int i;
+
+	static const char *ptpEventNames[]=
+	{
+			"ENET_1588_EVENT0_IN", "ENET_1588_EVENT0_OUT",
+			"ENET_1588_EVENT1_IN", "ENET_1588_EVENT1_OUT",
+			"ENET_1588_EVENT2_IN", "ENET_1588_EVENT2_OUT",
+			"ENET_1588_EVENT3_IN", "ENET_1588_EVENT3_OUT",
+			"POSIX timer (alarm) event"
+	};
 
 	fep->ptp_caps.owner = THIS_MODULE;
 	snprintf(fep->ptp_caps.name, 16, "fec ptp");
 
+	for (i = 0; i < FEC_NB_SDP; i++)
+	{
+		struct ptp_pin_desc *ppd = &fep->sdp_config[i];
+
+		strncpy(ppd->name, ptpEventNames[i], sizeof(ppd->name));
+		ppd->index = i;
+		ppd->func = PTP_PF_NONE;
+	}
+
 	fep->ptp_caps.max_adj = 250000000;
-	fep->ptp_caps.n_alarm = 0;
-	fep->ptp_caps.n_ext_ts = 0;
-	fep->ptp_caps.n_per_out = 0;
-	fep->ptp_caps.n_pins = 0;
-	fep->ptp_caps.pps = 1;
+	fep->ptp_caps.n_alarm = 1;
+	fep->ptp_caps.n_ext_ts = 4;
+	fep->ptp_caps.n_per_out = 4;
+	fep->ptp_caps.n_pins = FEC_NB_SDP;
+	fep->ptp_caps.pps = 0;
+	fep->ptp_caps.pin_config = fep->sdp_config;
 	fep->ptp_caps.adjfreq = fec_ptp_adjfreq;
 	fep->ptp_caps.adjtime = fec_ptp_adjtime;
 	fep->ptp_caps.gettime64 = fec_ptp_gettime;
 	fep->ptp_caps.settime64 = fec_ptp_settime;
 	fep->ptp_caps.enable = fec_ptp_enable;
+	fep->ptp_caps.verify = fec_ptp_verify_pin;
 	fep->ptp_caps.timerenable = fec_ptp_timer_enable;
 	fep->ptp_caps.timersettime = fec_ptp_timer_settime;
 
 	fep->cycle_speed = clk_get_rate(fep->clk_ptp);
 	fep->ptp_inc = NSEC_PER_SEC / fep->cycle_speed;
 	fep->timer_enabled = false;
+
+	printk(KERN_ALERT "FEC cycle_speed %d, ptp_inc %d\n", fep->cycle_speed, fep->ptp_inc);
 
 	spin_lock_init(&fep->tmreg_lock);
 
@@ -776,6 +962,8 @@ uint fec_ptp_check_alarm_event(struct fec_enet_private *fep)
 				/* ptp_clock_event will return the next time to set */
 				ptp_clock_event(fep->ptp_clock, &event);
 				ns = timespec64_to_ns(&event.alarm_time);
+
+				printk(KERN_ALERT "fec_ptp_check_alarm_event: time already passed, now setting to %llu\n", ns);
 			}
 		}
 		return 1;
