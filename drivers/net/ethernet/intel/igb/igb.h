@@ -345,8 +345,9 @@ struct hwmon_buff {
 
 #define IGB_N_EXTTS	2
 #define IGB_N_PEROUT	2
-#define IGB_N_ALARM	1
-#define IGB_N_SDP	4
+#define IGB_N_ALARM	2	//the number of channels which can be used as an alarm (only one at a time though)
+#define IGB_N_SDP	5	//the posix timer + 4 pins
+#define IGB_SDP_TIMER	0
 #define IGB_RETA_SIZE	128
 
 /* board specific private data structure */
@@ -544,7 +545,7 @@ void igb_ptp_rx_pktstamp(struct igb_q_vector *q_vector, unsigned char *va,
 int igb_ptp_set_ts_config(struct net_device *netdev, struct ifreq *ifr);
 int igb_ptp_get_ts_config(struct net_device *netdev, struct ifreq *ifr);
 void igb_set_flag_queue_pairs(struct igb_adapter *, const u32);
-bool igb_tt0_timer_enable(struct igb_adapter *adapter, bool enable);
+bool igb_tt_timer_enable(struct igb_adapter *adapter, bool enable);
 void igb_ptp_read_i210(struct igb_adapter *adapter,
 		       struct timespec64 *ts);
 #ifdef CONFIG_IGB_HWMON

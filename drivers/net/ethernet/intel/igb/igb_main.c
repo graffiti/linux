@@ -5394,14 +5394,15 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 	struct ptp_clock_event event;
 	struct timespec64 ts;
 	u32 tsauxc, sec, nsec, tsicr;
-	bool wasEnabled = false;
+	bool timerWasEnabled = false;
+	bool timerHasBeenHandled = false;
 
 	//if a timer is set, we must temporarily disable it
 	//so that it doesn't immediately fire again when TSICR is read
 	if (adapter->timer_enabled)
 	{
 		spin_lock(&adapter->tmreg_lock);
-		wasEnabled = igb_tt0_timer_enable(adapter, false);
+		timerWasEnabled = igb_tt_timer_enable(adapter, false);
 		spin_unlock(&adapter->tmreg_lock);
 	}
 
@@ -5423,7 +5424,7 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 
 	if (tsicr & TSINTR_TT0)
 	{
-		if (adapter->timer_enabled)
+		if (adapter->timer_enabled && (adapter->sdp_config[IGB_SDP_TIMER].chan == 0) )
 		{
 			spin_lock(&adapter->tmreg_lock);
 			igb_ptp_read_i210(adapter, &event.alarm_time);
@@ -5440,10 +5441,12 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 				wr32(E1000_TRGTTIML0, event.alarm_time.tv_nsec);
 				wr32(E1000_TRGTTIMH0,
 				     (u32)event.alarm_time.tv_sec);
-				igb_tt0_timer_enable(adapter, true);
+				igb_tt_timer_enable(adapter, true);
 			}
 			spin_unlock(&adapter->tmreg_lock);
-		} else
+			timerHasBeenHandled = true;
+		}
+		else
 		{
 			/* this is a periodic output interrupt */
 			spin_lock(&adapter->tmreg_lock);
@@ -5459,26 +5462,51 @@ static void igb_tsync_interrupt(struct igb_adapter *adapter)
 			spin_unlock(&adapter->tmreg_lock);
 		}
 	}
-	else
+
+	if (tsicr & TSINTR_TT1)
 	{
-		if (adapter->timer_enabled && wasEnabled)
+		if (adapter->timer_enabled && (adapter->sdp_config[IGB_SDP_TIMER].chan == 1) )
 		{
 			spin_lock(&adapter->tmreg_lock);
-			igb_tt0_timer_enable(adapter, true);
+			igb_ptp_read_i210(adapter, &event.alarm_time);
+			spin_unlock(&adapter->tmreg_lock);
+
+			event.type = PTP_CLOCK_ALARM;
+			event.index = 0;
+			/* ptp_clock_event will return the next time to set */
+			ptp_clock_event(adapter->ptp_clock, &event);
+
+			spin_lock(&adapter->tmreg_lock);
+			if (timespec64_to_ns(&event.alarm_time) != 0) {
+				/* set new trigger time and then enable timer */
+				wr32(E1000_TRGTTIML1, event.alarm_time.tv_nsec);
+				wr32(E1000_TRGTTIMH1,
+						(u32)event.alarm_time.tv_sec);
+				igb_tt_timer_enable(adapter, true);
+			}
+			spin_unlock(&adapter->tmreg_lock);
+			timerHasBeenHandled = true;
+		}
+		else
+		{
+			spin_lock(&adapter->tmreg_lock);
+			ts = timespec64_add(adapter->perout[1].start,
+					adapter->perout[1].period);
+			wr32(E1000_TRGTTIML1, ts.tv_nsec);
+			wr32(E1000_TRGTTIMH1, (u32)ts.tv_sec);
+			tsauxc = rd32(E1000_TSAUXC);
+			tsauxc |= TSAUXC_EN_TT1;
+			wr32(E1000_TSAUXC, tsauxc);
+			adapter->perout[1].start = ts;
 			spin_unlock(&adapter->tmreg_lock);
 		}
 	}
 
-	if (tsicr & TSINTR_TT1) {
+	//if we disabled the timer and this int wasn't a timer int, re-enable it
+	if (adapter->timer_enabled && timerWasEnabled && !timerHasBeenHandled)
+	{
 		spin_lock(&adapter->tmreg_lock);
-		ts = timespec64_add(adapter->perout[1].start,
-				    adapter->perout[1].period);
-		wr32(E1000_TRGTTIML1, ts.tv_nsec);
-		wr32(E1000_TRGTTIMH1, (u32)ts.tv_sec);
-		tsauxc = rd32(E1000_TSAUXC);
-		tsauxc |= TSAUXC_EN_TT1;
-		wr32(E1000_TSAUXC, tsauxc);
-		adapter->perout[1].start = ts;
+		igb_tt_timer_enable(adapter, true);
 		spin_unlock(&adapter->tmreg_lock);
 	}
 
