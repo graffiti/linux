@@ -68,6 +68,12 @@ struct ptp_perout_request {
 	unsigned int rsv[4];          /* Reserved for future use. */
 };
 
+struct ptp_alarm_request {
+	unsigned int index;  /* Which channel to configure. */
+	unsigned int flags;  /* Bit field for PTP_xxx flags. */
+	unsigned int rsv[2]; /* Reserved for future use. */
+};
+
 #define PTP_MAX_SAMPLES 25 /* Maximum allowed offset measurement samples. */
 
 struct ptp_sys_offset {
@@ -86,6 +92,7 @@ enum ptp_pin_function {
 	PTP_PF_EXTTS,
 	PTP_PF_PEROUT,
 	PTP_PF_PHYSYNC,
+	PTP_PF_TIMER
 };
 
 struct ptp_pin_desc {

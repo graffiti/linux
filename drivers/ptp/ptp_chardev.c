@@ -88,6 +88,11 @@ int ptp_set_pinfunc(struct ptp_clock *ptp, unsigned int pin,
 	case PTP_PF_PHYSYNC:
 		if (chan != 0)
 			return -EINVAL;
+		break;
+	case PTP_PF_TIMER:
+		if (chan >= info->n_alarm)
+			return -EINVAL;
+		break;
 	default:
 		return -EINVAL;
 	}

@@ -220,15 +220,19 @@ static int ptp_timer_create(struct posix_clock *pc, struct k_itimer *kit)
 	struct ptp_clock *ptp = container_of(pc, struct ptp_clock, clock);
 	int err = 0;
 	unsigned long tq_lock_flags;
+	struct ptp_clock_request rq;
 
-	if (ptp->info->timerenable == 0)
+	if (ptp->info->enable == 0)
 		return -EOPNOTSUPP;
 
 	spin_lock_irqsave(&ptp->tq_lock, tq_lock_flags);
 
-	if (ptp->number_of_timers == 0) {
+	if (ptp->number_of_timers == 0)
+	{
 		/* hardware timer is disabled, enable it */
-		err = ptp->info->timerenable(ptp->info, true);
+		//err = ptp->info->timerenable(ptp->info, true);
+		rq.type = PTP_CLK_REQ_ALARM;
+		err = ptp->info->enable(ptp->info, &rq, 1);
 	}
 
 	if (err == 0) {
@@ -246,8 +250,9 @@ static int ptp_timer_delete(struct posix_clock *pc, struct k_itimer *kit)
 	struct ptp_clock *ptp = container_of(pc, struct ptp_clock, clock);
 	int err = 0;
 	unsigned long tq_lock_flags;
+	struct ptp_clock_request rq;
 
-	if (ptp->info->timerenable == 0)
+	if (ptp->info->enable == 0)
 		return -EOPNOTSUPP;
 
 	spin_lock_irqsave(&ptp->tq_lock, tq_lock_flags);
@@ -261,7 +266,9 @@ static int ptp_timer_delete(struct posix_clock *pc, struct k_itimer *kit)
 		/* there are no more timers set on this device,
 		 * so we can disable the hardware timer
 		 */
-		err = ptp->info->timerenable(ptp->info, false);
+		//err = ptp->info->timerenable(ptp->info, false);
+		rq.type = PTP_CLK_REQ_ALARM;
+		err = ptp->info->enable(ptp->info, &rq, 0);
 	}
 
 	spin_unlock_irqrestore(&ptp->tq_lock, tq_lock_flags);

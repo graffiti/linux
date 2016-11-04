@@ -31,6 +31,7 @@ struct ptp_clock_request {
 		PTP_CLK_REQ_EXTTS,
 		PTP_CLK_REQ_PEROUT,
 		PTP_CLK_REQ_PPS,
+		PTP_CLK_REQ_ALARM
 	} type;
 	union {
 		struct ptp_extts_request extts;
@@ -110,7 +111,6 @@ struct ptp_clock_info {
 		      struct ptp_clock_request *request, int on);
 	int (*verify)(struct ptp_clock_info *ptp, unsigned int pin,
 		      enum ptp_pin_function func, unsigned int chan);
-	int (*timerenable)(struct ptp_clock_info *ptp, bool enable);
 	int (*timersettime)(struct ptp_clock_info *ptp, struct timespec64 *ts);
 };
 
