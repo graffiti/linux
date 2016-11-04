@@ -76,6 +76,7 @@
 #define IGB_NBITS_82580			40
 
 static void igb_ptp_tx_hwtstamp(struct igb_adapter *adapter);
+static int igb_ptp_timer_enable_i210(struct ptp_clock_info *ptp, bool enable);
 
 /* SYSTIM read access for the 82576 */
 static cycle_t igb_ptp_read_82576(const struct cyclecounter *cc)
@@ -597,6 +598,9 @@ static int igb_ptp_feature_enable_i210(struct ptp_clock_info *ptp,
 		wr32(E1000_TSIM, tsim);
 		spin_unlock_irqrestore(&igb->tmreg_lock, flags);
 		return 0;
+
+	case PTP_CLK_REQ_ALARM:
+		return igb_ptp_timer_enable_i210(ptp, on!=0);
 	}
 
 	return -EOPNOTSUPP;
@@ -611,12 +615,22 @@ static int igb_ptp_feature_enable(struct ptp_clock_info *ptp,
 static int igb_ptp_verify_pin(struct ptp_clock_info *ptp, unsigned int pin,
 			      enum ptp_pin_function func, unsigned int chan)
 {
+	//the timer 'pin' can only be a timer, or NONE
+	if(pin == IGB_SDP_TIMER)
+	{
+		if((func == PTP_PF_NONE) || (func == PTP_PF_TIMER))
+			return 0;
+		return -1;
+	}
+
+	//all other pins can be EXTTS, PEROUT, or NONE
 	switch (func) {
 	case PTP_PF_NONE:
 	case PTP_PF_EXTTS:
 	case PTP_PF_PEROUT:
 		break;
 	case PTP_PF_PHYSYNC:
+	case PTP_PF_TIMER:
 		return -1;
 	}
 	return 0;
@@ -1010,23 +1024,24 @@ int igb_ptp_set_ts_config(struct net_device *netdev, struct ifreq *ifr)
 }
 
 /* tmreg_lock should be held for this call */
-bool igb_tt0_timer_enable(struct igb_adapter *adapter, bool enable)
+bool igb_tt_timer_enable(struct igb_adapter *igb, bool enable)
 {
 	u32 tsauxc;
-	struct e1000_hw *hw = &adapter->hw;
+	struct e1000_hw *hw = &igb->hw;
 	bool wasEnabled;
+	int chan = igb->sdp_config[IGB_SDP_TIMER].chan;
 
 	tsauxc = rd32(E1000_TSAUXC);
 
-	wasEnabled = (tsauxc & TSAUXC_EN_TT0);
+	wasEnabled = (tsauxc & (chan==0?TSAUXC_EN_TT0:TSAUXC_EN_TT1));
 
 	if (enable)
 	{
-		tsauxc |= TSAUXC_EN_TT0;
+		tsauxc |= (chan==0?TSAUXC_EN_TT0:TSAUXC_EN_TT1);
 		wr32(E1000_TSAUXC, tsauxc);
 	} else
 	{
-		tsauxc &= ~TSAUXC_EN_TT0;
+		tsauxc &= ~(chan==0?TSAUXC_EN_TT0:TSAUXC_EN_TT1);
 		wr32(E1000_TSAUXC, tsauxc);
 	}
 
@@ -1043,7 +1058,7 @@ static int igb_ptp_timer_settime_i210(struct ptp_clock_info *ptp,
 
 	spin_lock_irqsave(&igb->tmreg_lock, irqsaveflags);
 
-	igb_tt0_timer_enable(igb, false);
+	igb_tt_timer_enable(igb, false);
 
 	if (timespec64_to_ns(ts) != 0)
 	{
@@ -1051,7 +1066,7 @@ static int igb_ptp_timer_settime_i210(struct ptp_clock_info *ptp,
 		wr32(E1000_TRGTTIML0, ts->tv_nsec);
 		wr32(E1000_TRGTTIMH0, (u32)ts->tv_sec);
 
-		igb_tt0_timer_enable(igb, true);
+		igb_tt_timer_enable(igb, true);
 	}
 
 	spin_unlock_irqrestore(&igb->tmreg_lock, irqsaveflags);
@@ -1059,52 +1074,51 @@ static int igb_ptp_timer_settime_i210(struct ptp_clock_info *ptp,
 	return 0;
 }
 
-int igb_ptp_timer_enable_i210(struct ptp_clock_info *ptp, bool enable)
+static int igb_ptp_timer_enable_i210(struct ptp_clock_info *ptp, bool enable)
 {
 	struct igb_adapter *igb =
 			container_of(ptp, struct igb_adapter, ptp_caps);
 	struct e1000_hw *hw = &igb->hw;
-	u32 tsauxc, tsim;
+	u32 tsim;
 	unsigned long flags;
-	bool periodic_output_enabled;
+	int chan = igb->sdp_config[IGB_SDP_TIMER].chan;
 
-	if (enable)	{
-		if (!igb->timer_enabled) {
-			spin_lock_irqsave(&igb->tmreg_lock, flags);
-			tsauxc = rd32(E1000_TSAUXC);
-			periodic_output_enabled = tsauxc &
-				(TSAUXC_EN_TT0 | TSAUXC_EN_CLK0 | TSAUXC_ST0);
-			spin_unlock_irqrestore(&igb->tmreg_lock, flags);
-
-			if (periodic_output_enabled) {
-				/* we share the TT0 with the periodic output
-				 * generator, and that is already enabled
-				 */
+	if (enable)
+	{
+		if (!igb->timer_enabled)
+		{
+			//the pin must have been set as timer and assigned a channel
+			if(igb->sdp_config[IGB_SDP_TIMER].func != PTP_PF_TIMER)
 				return -EBUSY;
-			}
 
+			spin_lock_irqsave(&igb->tmreg_lock, flags);
 			igb->timer_enabled = true;
 
 			//enable interrupt
 			tsim = rd32(E1000_TSIM);
-			tsim |= TSINTR_TT0;
+			tsim |= (chan==0?TSINTR_TT0:TSINTR_TT1);
 			wr32(E1000_TSIM, tsim);
+			spin_unlock_irqrestore(&igb->tmreg_lock, flags);
 
 			return 0;
 		}
 		/* timer is already enabled */
 		return -EINVAL;
-	} else {
+	}
+	else
+	{
 		if (!igb->timer_enabled)
 			return -EINVAL;
 
+		spin_lock_irqsave(&igb->tmreg_lock, flags);
 		/* disable the timer */
-		igb_tt0_timer_enable(igb, false);
+		igb_tt_timer_enable(igb, false);
 		igb->timer_enabled = false;
 		//disable interrupt
 		tsim = rd32(E1000_TSIM);
-		tsim &= ~TSINTR_TT0;
+		tsim &= ~(chan==0?TSINTR_TT0:TSINTR_TT0);
 		wr32(E1000_TSIM, tsim);
+		spin_unlock_irqrestore(&igb->tmreg_lock, flags);
 	}
 
 	return 0;
@@ -1157,13 +1171,17 @@ void igb_ptp_init(struct igb_adapter *adapter)
 		break;
 	case e1000_i210:
 	case e1000_i211:
-		for (i = 0; i < IGB_N_SDP; i++) {
+		//set the generic SDP pin names
+		for (i = 0; i < IGB_N_SDP; i++)
+		{
 			struct ptp_pin_desc *ppd = &adapter->sdp_config[i];
-
 			snprintf(ppd->name, sizeof(ppd->name), "SDP%d", i);
 			ppd->index = i;
 			ppd->func = PTP_PF_NONE;
 		}
+		//set the timer pin name
+		snprintf(adapter->sdp_config[IGB_SDP_TIMER].name, sizeof(adapter->sdp_config[IGB_SDP_TIMER].name), "POSIX timer (alarm) event");
+
 		snprintf(adapter->ptp_caps.name, 16, "%pm", netdev->dev_addr);
 		adapter->ptp_caps.owner = THIS_MODULE;
 		adapter->ptp_caps.max_adj = 62499999;
@@ -1179,7 +1197,6 @@ void igb_ptp_init(struct igb_adapter *adapter)
 		adapter->ptp_caps.settime64 = igb_ptp_settime_i210;
 		adapter->ptp_caps.enable = igb_ptp_feature_enable_i210;
 		adapter->ptp_caps.verify = igb_ptp_verify_pin;
-		adapter->ptp_caps.timerenable = igb_ptp_timer_enable_i210;
 		adapter->ptp_caps.timersettime = igb_ptp_timer_settime_i210;
 		/* Enable the timer functions by clearing bit 31. */
 		wr32(E1000_TSAUXC, 0x0);
