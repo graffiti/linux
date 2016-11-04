@@ -913,7 +913,7 @@ void fec_ptp_init(struct platform_device *pdev)
 	}
 
 	fep->ptp_caps.max_adj = 250000000;
-	fep->ptp_caps.n_alarm = 1;
+	fep->ptp_caps.n_alarm = 4;		//='number of channels which can be assigned to alarm'
 	fep->ptp_caps.n_ext_ts = 4;
 	fep->ptp_caps.n_per_out = 4;
 	fep->ptp_caps.n_pins = FEC_NB_SDP;
