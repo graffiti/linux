@@ -616,7 +616,7 @@ static int igb_ptp_verify_pin(struct ptp_clock_info *ptp, unsigned int pin,
 			      enum ptp_pin_function func, unsigned int chan)
 {
 	//the timer 'pin' can only be a timer, or NONE
-	if(pin == 0)
+	if(pin == IGB_SDP_TIMER)
 	{
 		if((func == PTP_PF_NONE) || (func == PTP_PF_TIMER))
 			return 0;
@@ -1171,17 +1171,17 @@ void igb_ptp_init(struct igb_adapter *adapter)
 		break;
 	case e1000_i210:
 	case e1000_i211:
+		//set the generic SDP pin names
 		for (i = 0; i < IGB_N_SDP; i++)
 		{
 			struct ptp_pin_desc *ppd = &adapter->sdp_config[i];
-
-			if( 0 == i)
-				snprintf(ppd->name, sizeof(ppd->name), "POSIX timer (alarm) event");
-			else
-				snprintf(ppd->name, sizeof(ppd->name), "SDP%d", i-1);
+			snprintf(ppd->name, sizeof(ppd->name), "SDP%d", i);
 			ppd->index = i;
 			ppd->func = PTP_PF_NONE;
 		}
+		//set the timer pin name
+		snprintf(adapter->sdp_config[IGB_SDP_TIMER].name, sizeof(adapter->sdp_config[IGB_SDP_TIMER].name), "POSIX timer (alarm) event");
+
 		snprintf(adapter->ptp_caps.name, 16, "%pm", netdev->dev_addr);
 		adapter->ptp_caps.owner = THIS_MODULE;
 		adapter->ptp_caps.max_adj = 62499999;

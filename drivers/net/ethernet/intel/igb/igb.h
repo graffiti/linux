@@ -347,7 +347,7 @@ struct hwmon_buff {
 #define IGB_N_PEROUT	2
 #define IGB_N_ALARM	2	//the number of channels which can be used as an alarm (only one at a time though)
 #define IGB_N_SDP	5	//the posix timer + 4 pins
-#define IGB_SDP_TIMER	0
+#define IGB_SDP_TIMER	4	//the pin which is for the timer
 #define IGB_RETA_SIZE	128
 
 /* board specific private data structure */
