@@ -409,22 +409,6 @@ static int fec_ptp_gettime(struct ptp_clock_info *ptp, struct timespec64 *ts)
 
 	spin_lock_irqsave(&adapter->tmreg_lock, flags);
 	ns = timecounter_read(&adapter->tc);
-
-
-	//kjt debug
-	printk(KERN_ALERT "fec: ATCR = %x\n", readl(adapter->hwp + FEC_ATCR));
-	printk(KERN_ALERT "fec: ATINC = %x\n", readl(adapter->hwp + FEC_ATINC));
-	printk(KERN_ALERT "fec: ATSTMP = %x\n", readl(adapter->hwp + FEC_ATSTMP));
-	printk(KERN_ALERT "fec: ATPER = %x\n", readl(adapter->hwp + FEC_ATPER));
-	printk(KERN_ALERT "fec: ATOFF = %x\n", readl(adapter->hwp + FEC_ATOFF));
-	printk(KERN_ALERT "fec: ENET_ECR = %x\n", readl(adapter->hwp + FEC_ECNTRL));
-
-	writel((u32)1<<11, adapter->hwp + FEC_ATCR);
-	printk(KERN_ALERT "fec: ATVR = %x\n", readl(adapter->hwp + FEC_ATVR));
-	//end kjt debug
-
-
-
 	spin_unlock_irqrestore(&adapter->tmreg_lock, flags);
 
 	*ts = ns_to_timespec64(ns);
@@ -702,7 +686,6 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 {
 	u32 val;
 	u64 time_now, nsShifted;
-	int tries = 0;
 	int chan = fep->sdp_config[FEC_SDP_TIMER].chan;
 
 	if(enable)
@@ -710,11 +693,12 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 		//first disable it
 		fec_tc_enable(fep, false, 0);
 
-
 		//set trigger time
 		time_now = timecounter_read(&fep->tc);
 
 		//printk(KERN_ALERT "fec_tc_enable: time now = %llu, tc->cycle_last = %llu, tc->nsec = %llu\n", time_now, fep->tc.cycle_last, fep->tc.nsec);
+		udelay(1000);
+		//KJT TODO NEXT!!! (WHY IS THIS DELAY REQUIRED??!! WHAT ARE WE WAITING FOR???!
 
 		nsShifted = ns - ((fep->tc.nsec & fep->cc.mask) - fep->tc.cycle_last);
 
@@ -730,15 +714,11 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 		val |= (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET);
 		writel(val, fep->hwp + FEC_TCSR(chan));
 
-		while( tries<100 && ((readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET)) )
+		while(((readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET)) )
 		{
-			writel(val, fep->hwp + FEC_TCSR(chan));
-			tries++;
+
 		}
-		if(tries == 100)
-		{
-			printk(KERN_ALERT "TSCR stuck on %d writing %d try %d\n", readl(fep->hwp + FEC_TCSR(chan)), val, tries);
-		}
+
 
 		if (ns!=0)
 		{
@@ -765,12 +745,11 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 
 		while( (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (FEC_TMODE_DISABLED << FEC_T_TMODE_OFFSET) )
 		{
-			printk(KERN_ALERT ".");
+
 		}
 		while (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TF_MASK)
 		{
-			writel(val, fep->hwp + FEC_TCSR(chan));
-			printk(KERN_ALERT "-");
+
 		}
 		return true;
 	}
@@ -785,14 +764,14 @@ static int fec_ptp_timer_settime(struct ptp_clock_info *ptp,
 	unsigned long irqsaveflags;
 	struct ptp_clock_event event;
 
-	printk(KERN_ALERT "fec_ptp_timer_settime: ts %d:%d\n", (int)ts->tv_sec, (int)ts->tv_nsec);
+	//printk(KERN_ALERT "fec_ptp_timer_settime: ts %d:%d\n", (int)ts->tv_sec, (int)ts->tv_nsec);
 
 	ns = timespec64_to_ns(ts);
 	mutex_lock(&fep->ptp_clk_mutex);
 	spin_lock_irqsave(&fep->tmreg_lock, irqsaveflags);
 
-	/* disable timer */
-	fec_tc_enable(fep, false, 0);
+	if(0 == ns)
+		fec_tc_enable(fep, false, 0);
 
 	/* set trigger time and enable timer */
 	while ((ns !=0) && !fec_tc_enable(fep, true, ns))
@@ -803,7 +782,7 @@ static int fec_ptp_timer_settime(struct ptp_clock_info *ptp,
 		ptp_clock_event(fep->ptp_clock, &event);
 		ns = timespec64_to_ns(&event.alarm_time);
 
-		printk(KERN_ALERT "fec_ptp_timer_settime: time already passed, now setting to %llu\n", ns);
+		//printk(KERN_ALERT "fec_ptp_timer_settime: time already passed, now setting to %llu\n", ns);
 	}
 
 	spin_unlock_irqrestore(&fep->tmreg_lock, irqsaveflags);
@@ -830,7 +809,7 @@ static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
 			fep->timer_enabled = true;
 			spin_unlock_irqrestore(&fep->tmreg_lock, flags);
 
-			printk(KERN_ALERT "fec: timer enabled\n");
+			//printk(KERN_ALERT "fec: timer enabled\n");
 			return 0;
 		}
 		/* timer is already enabled */
@@ -845,7 +824,7 @@ static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
 		fep->timer_enabled = false;
 		spin_unlock_irqrestore(&fep->tmreg_lock, flags);
 
-		printk(KERN_ALERT "fec: timer disabled\n");
+		//printk(KERN_ALERT "fec: timer disabled\n");
 	}
 
 	return 0;
@@ -917,7 +896,7 @@ void fec_ptp_init(struct platform_device *pdev)
 	fep->ptp_caps.n_ext_ts = 4;
 	fep->ptp_caps.n_per_out = 4;
 	fep->ptp_caps.n_pins = FEC_NB_SDP;
-	fep->ptp_caps.pps = 0;
+	fep->ptp_caps.pps = 1;
 	fep->ptp_caps.pin_config = fep->sdp_config;
 	fep->ptp_caps.adjfreq = fec_ptp_adjfreq;
 	fep->ptp_caps.adjtime = fec_ptp_adjtime;
@@ -980,7 +959,7 @@ uint fec_ptp_check_alarm_event(struct fec_enet_private *fep)
 				ptp_clock_event(fep->ptp_clock, &event);
 				ns = timespec64_to_ns(&event.alarm_time);
 
-				printk(KERN_ALERT "fec_ptp_check_alarm_event: time already passed, now setting to %llu\n", ns);
+				//printk(KERN_ALERT "fec_ptp_check_alarm_event: time already passed, now setting to %llu\n", ns);
 			}
 		}
 		return 1;
