@@ -1602,7 +1602,7 @@ fec_enet_interrupt(int irq, void *dev_id)
 		complete(&fep->mdio_done);
 	}
 
-	if (fep->ptp_clock)
+	if (fep->ptp_clock && fep->pps_enable)
 		fec_ptp_check_pps_event(fep);
 
 	fec_ptp_check_alarm_event(fep);

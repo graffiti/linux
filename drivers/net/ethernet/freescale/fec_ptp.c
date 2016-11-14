@@ -250,8 +250,12 @@ static cycle_t fec_ptp_read(const struct cyclecounter *cc)
 		platform_get_device_id(fep->pdev);
 	u32 tempval;
 
-	tempval = readl(fep->hwp + FEC_ATIME_CTRL);
-	tempval |= FEC_T_CTRL_CAPTURE;
+	//23.5.87 "It is not necessary to preserve any of the configuration fields
+	//when a comand field is set in the register, that is, no read-modify-write
+	//is required"
+	//tempval = readl(fep->hwp + FEC_ATIME_CTRL);
+	//tempval |= FEC_T_CTRL_CAPTURE;
+	tempval = FEC_T_CTRL_CAPTURE;
 	writel(tempval, fep->hwp + FEC_ATIME_CTRL);
 
 	if (id_entry->driver_data & FEC_QUIRK_BUG_CAPTURE)
@@ -696,16 +700,12 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 		//set trigger time
 		time_now = timecounter_read(&fep->tc);
 
-		//printk(KERN_ALERT "fec_tc_enable: time now = %llu, tc->cycle_last = %llu, tc->nsec = %llu\n", time_now, fep->tc.cycle_last, fep->tc.nsec);
-		udelay(1000);
-		//KJT TODO NEXT!!! (WHY IS THIS DELAY REQUIRED??!! WHAT ARE WE WAITING FOR???!
-
 		nsShifted = ns - ((fep->tc.nsec & fep->cc.mask) - fep->tc.cycle_last);
 
 		val = nsShifted & fep->cc.mask;
 		writel(val, fep->hwp + FEC_TCCR(chan));
 
-		/* Compare channel setting. */
+		//enable
 		val = readl(fep->hwp + FEC_TCSR(chan));
 		val |= (1 << FEC_T_TF_OFFSET);
 		val |= (1 << FEC_T_TIE_OFFSET);
@@ -716,9 +716,7 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 
 		while(((readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET)) )
 		{
-
 		}
-
 
 		if (ns!=0)
 		{
@@ -735,7 +733,6 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 	else
 	{
 		//disable
-		/* Compare channel setting. */
 		val = readl(fep->hwp + FEC_TCSR(chan));
 		val |= (1 << FEC_T_TF_OFFSET);
 		val &= ~(1 << FEC_T_TDRE_OFFSET);
@@ -745,11 +742,11 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 
 		while( (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (FEC_TMODE_DISABLED << FEC_T_TMODE_OFFSET) )
 		{
-
 		}
 		while (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TF_MASK)
 		{
-
+			//if for any reason TF fired while disabling, clear it again
+			writel(val, fep->hwp + FEC_TCSR(chan));
 		}
 		return true;
 	}
