@@ -109,6 +109,7 @@
 #define DEFAULT_PPS_CHANNEL	FEC_CHANNLE_0
 
 static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable);
+static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsigned int chan, u32 period);
 
 /**
  * fec_ptp_enable_pps
@@ -509,77 +510,7 @@ static int fec_ptp_enable(struct ptp_clock_info *ptp,
 		return 0;
 
 	case PTP_CLK_REQ_PEROUT:
-		/* do we have a timer enabled on the requested channel? */
-		if (fep->timer_enabled && (rq->perout.index == fep->sdp_config[FEC_SDP_TIMER].chan))
-			return -EBUSY;
-		if (on) {
-			pin = ptp_find_pin(fep->ptp_clock, PTP_PF_PEROUT,
-					rq->perout.index);
-			if (pin < 0)
-				return -EBUSY;
-		}
-		ts.tv_sec = rq->perout.period.sec;
-		ts.tv_nsec = rq->perout.period.nsec;
-		ns = timespec64_to_ns(&ts);
-		ns = ns >> 1;
-		if (on && ns <= 70000000LL) {
-			if (ns < 8LL)
-				return -EINVAL;
-			use_freq = 1;
-		}
-		ts = ns_to_timespec64(ns);
-/*		if (rq->perout.index == 1) {
-			if (use_freq) {
-				tsauxc_mask = TSAUXC_EN_CLK1 | TSAUXC_ST1;
-				tsim_mask = 0;
-			} else {
-				tsauxc_mask = TSAUXC_EN_TT1;
-				tsim_mask = TSINTR_TT1;
-			}
-			trgttiml = E1000_TRGTTIML1;
-			trgttimh = E1000_TRGTTIMH1;
-			freqout = E1000_FREQOUT1;
-		} else {
-			if (use_freq) {
-				tsauxc_mask = TSAUXC_EN_CLK0 | TSAUXC_ST0;
-				tsim_mask = 0;
-			} else {
-				tsauxc_mask = TSAUXC_EN_TT0;
-				tsim_mask = TSINTR_TT0;
-			}
-			trgttiml = E1000_TRGTTIML0;
-			trgttimh = E1000_TRGTTIMH0;
-			freqout = E1000_FREQOUT0;
-		}
-		spin_lock_irqsave(&igb->tmreg_lock, flags);
-		tsauxc = rd32(E1000_TSAUXC);
-		tsim = rd32(E1000_TSIM);
-		if (rq->perout.index == 1) {
-			tsauxc &= ~(TSAUXC_EN_TT1 | TSAUXC_EN_CLK1 | TSAUXC_ST1);
-			tsim &= ~TSINTR_TT1;
-		} else {
-			tsauxc &= ~(TSAUXC_EN_TT0 | TSAUXC_EN_CLK0 | TSAUXC_ST0);
-			tsim &= ~TSINTR_TT0;
-		}
-		if (on) {
-			int i = rq->perout.index;
-			igb_pin_perout(igb, i, pin, use_freq);
-			igb->perout[i].start.tv_sec = rq->perout.start.sec;
-			igb->perout[i].start.tv_nsec = rq->perout.start.nsec;
-			igb->perout[i].period.tv_sec = ts.tv_sec;
-			igb->perout[i].period.tv_nsec = ts.tv_nsec;
-			wr32(trgttimh, rq->perout.start.sec);
-			wr32(trgttiml, rq->perout.start.nsec);
-			if (use_freq)
-				wr32(freqout, ns);
-			tsauxc |= tsauxc_mask;
-			tsim |= tsim_mask;
-		}
-		wr32(E1000_TSAUXC, tsauxc);
-		wr32(E1000_TSIM, tsim);
-		spin_unlock_irqrestore(&igb->tmreg_lock, flags);
-		*/
-		return 0;
+		return fec_ptp_perout_enable(ptp, on!=0, rq->perout.index, (rq->perout.period.sec * 1000000000) + rq->perout.period.nsec);
 
 	case PTP_CLK_REQ_ALARM:
 		return fec_ptp_timer_enable(ptp, on!=0);
@@ -690,7 +621,7 @@ bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
 {
 	u32 val;
 	u64 time_now, nsShifted;
-	int chan = fep->sdp_config[FEC_SDP_TIMER].chan;
+	int chan = fep->timer_channel;
 
 	if(enable)
 	{
@@ -792,17 +723,24 @@ static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
 	struct fec_enet_private *fep =
 			    container_of(ptp, struct fec_enet_private, ptp_caps);
 	unsigned long flags;
+	int pin, chan;
 
+	//find the channel for the timer
+	for(chan=0; chan<FEC_NB_CHANNELS; chan++)
+	{
+		pin = ptp_find_pin(fep->ptp_clock, PTP_PF_TIMER, chan);
+		if(pin>=0)
+			break;
+	}
+	if (pin < 0)
+			return -EBUSY;
 
 	if (enable)
 	{
 		if (!fep->timer_enabled)
 		{
-			//the pin must have been set as timer and assigned a channel
-			if(fep->sdp_config[FEC_SDP_TIMER].func != PTP_PF_TIMER)
-				return -EBUSY;
-
 			spin_lock_irqsave(&fep->tmreg_lock, flags);
+			fep->timer_channel = chan;
 			fep->timer_enabled = true;
 			spin_unlock_irqrestore(&fep->tmreg_lock, flags);
 
@@ -827,26 +765,161 @@ static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
 	return 0;
 }
 
+static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsigned int chan, u32 period)
+{
+	struct fec_enet_private *fep =
+			    container_of(ptp, struct fec_enet_private, ptp_caps);
+	unsigned long flags;
+	u32 val;
+	int pin;
+
+	pin = ptp_find_pin(fep->ptp_clock, PTP_PF_PEROUT, chan);
+	if (pin < 0)
+		return -EBUSY;
+
+	if(!enable)
+	{
+		//disable
+		val = readl(fep->hwp + FEC_TCSR(chan));
+		val |= (1 << FEC_T_TF_OFFSET);
+		val &= ~(1 << FEC_T_TDRE_OFFSET);
+		val &= ~(1 << FEC_T_TIE_OFFSET);
+		val &= ~(FEC_T_TMODE_MASK);
+		writel(val, fep->hwp + FEC_TCSR(chan));
+
+		while( (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (FEC_TMODE_DISABLED << FEC_T_TMODE_OFFSET) )
+		{
+		}
+		while (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TF_MASK)
+		{
+			//if for any reason TF fired while disabling, clear it again
+			writel(val, fep->hwp + FEC_TCSR(chan));
+		}
+	}
+
+
+
+	period = period >> 1;
+
+	if (period < 15625)	//32kHz max
+		return -EINVAL;
+
+
+	/*		if (rq->perout.index == 1) {
+				if (use_freq) {
+					tsauxc_mask = TSAUXC_EN_CLK1 | TSAUXC_ST1;
+					tsim_mask = 0;
+				} else {
+					tsauxc_mask = TSAUXC_EN_TT1;
+					tsim_mask = TSINTR_TT1;
+				}
+				trgttiml = E1000_TRGTTIML1;
+				trgttimh = E1000_TRGTTIMH1;
+				freqout = E1000_FREQOUT1;
+			} else {
+				if (use_freq) {
+					tsauxc_mask = TSAUXC_EN_CLK0 | TSAUXC_ST0;
+					tsim_mask = 0;
+				} else {
+					tsauxc_mask = TSAUXC_EN_TT0;
+					tsim_mask = TSINTR_TT0;
+				}
+				trgttiml = E1000_TRGTTIML0;
+				trgttimh = E1000_TRGTTIMH0;
+				freqout = E1000_FREQOUT0;
+			}
+			spin_lock_irqsave(&igb->tmreg_lock, flags);
+			tsauxc = rd32(E1000_TSAUXC);
+			tsim = rd32(E1000_TSIM);
+			if (rq->perout.index == 1) {
+				tsauxc &= ~(TSAUXC_EN_TT1 | TSAUXC_EN_CLK1 | TSAUXC_ST1);
+				tsim &= ~TSINTR_TT1;
+			} else {
+				tsauxc &= ~(TSAUXC_EN_TT0 | TSAUXC_EN_CLK0 | TSAUXC_ST0);
+				tsim &= ~TSINTR_TT0;
+			}
+			if (on) {
+				int i = rq->perout.index;
+				igb_pin_perout(igb, i, pin, use_freq);
+				igb->perout[i].start.tv_sec = rq->perout.start.sec;
+				igb->perout[i].start.tv_nsec = rq->perout.start.nsec;
+				igb->perout[i].period.tv_sec = ts.tv_sec;
+				igb->perout[i].period.tv_nsec = ts.tv_nsec;
+				wr32(trgttimh, rq->perout.start.sec);
+				wr32(trgttiml, rq->perout.start.nsec);
+				if (use_freq)
+					wr32(freqout, ns);
+				tsauxc |= tsauxc_mask;
+				tsim |= tsim_mask;
+			}
+			wr32(E1000_TSAUXC, tsauxc);
+			wr32(E1000_TSIM, tsim);
+			spin_unlock_irqrestore(&igb->tmreg_lock, flags);
+			*/
+			return 0;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+	if (enable)
+	{
+		if (!fep->timer_enabled)
+		{
+			//the pin must have been set as timer and assigned a channel
+			if(fep->sdp_config[FEC_SDP_TIMER].func != PTP_PF_TIMER)
+				return -EBUSY;
+
+			spin_lock_irqsave(&fep->tmreg_lock, flags);
+			fep->timer_enabled = true;
+			spin_unlock_irqrestore(&fep->tmreg_lock, flags);
+
+			//printk(KERN_ALERT "fec: timer enabled\n");
+			return 0;
+		}
+		// timer is already enabled
+		return -EINVAL;
+	} else {
+		if (!fep->timer_enabled)
+			return -EINVAL;
+
+		spin_lock_irqsave(&fep->tmreg_lock, flags);
+		// disable timer
+		fec_tc_enable(fep, false, 0);
+		fep->timer_enabled = false;
+		spin_unlock_irqrestore(&fep->tmreg_lock, flags);
+
+		//printk(KERN_ALERT "fec: timer disabled\n");
+	}
+
+	return 0;
+	*/
+}
+
 static int fec_ptp_verify_pin(struct ptp_clock_info *ptp, unsigned int pin,
 			      enum ptp_pin_function func, unsigned int chan)
 {
-	//the timer 'pin' can only be a timer, or NONE
-	if(pin == FEC_SDP_TIMER)
-	{
-		if((func == PTP_PF_NONE) || (func == PTP_PF_TIMER))
-			return 0;
-		return -1;
-	}
-
-	//all other pins can be EXTTS, PEROUT, or NONE
+	//all pins can be EXTTS, PEROUT, TIMER, or NONE
 	switch (func)
 	{
 	case PTP_PF_NONE:
 	case PTP_PF_EXTTS:
 	case PTP_PF_PEROUT:
+	case PTP_PF_TIMER:
 		break;
 	case PTP_PF_PHYSYNC:
-	case PTP_PF_TIMER:
 		return -1;
 	}
 	return 0;
@@ -869,11 +942,10 @@ void fec_ptp_init(struct platform_device *pdev)
 
 	static const char *ptpEventNames[]=
 	{
-			"POSIX timer (alarm) event",
-			"ENET_1588_EVENT0_IN", "ENET_1588_EVENT0_OUT",
-			"ENET_1588_EVENT1_IN", "ENET_1588_EVENT1_OUT",
-			"ENET_1588_EVENT2_IN", "ENET_1588_EVENT2_OUT",
-			"ENET_1588_EVENT3_IN", "ENET_1588_EVENT3_OUT"
+			"ENET_1588_EVENT0",
+			"ENET_1588_EVENT1",
+			"ENET_1588_EVENT2",
+			"ENET_1588_EVENT3"
 	};
 
 	fep->ptp_caps.owner = THIS_MODULE;
@@ -885,6 +957,7 @@ void fec_ptp_init(struct platform_device *pdev)
 
 		strncpy(ppd->name, ptpEventNames[i], sizeof(ppd->name));
 		ppd->index = i;
+		ppd->chan = i;
 		ppd->func = PTP_PF_NONE;
 	}
 
@@ -928,7 +1001,7 @@ uint fec_ptp_check_alarm_event(struct fec_enet_private *fep)
 	struct ptp_clock_event event;
 	u64 ns;
 
-	val = readl(fep->hwp + FEC_TCSR(fep->sdp_config[FEC_SDP_TIMER].chan));
+	val = readl(fep->hwp + FEC_TCSR(fep->timer_channel));
 
 	if (val & FEC_T_TF_MASK)
 	{
