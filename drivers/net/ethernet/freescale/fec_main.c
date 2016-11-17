@@ -1605,7 +1605,7 @@ fec_enet_interrupt(int irq, void *dev_id)
 	if (fep->ptp_clock && fep->pps_enable)
 		fec_ptp_check_pps_event(fep);
 
-	fec_ptp_check_alarm_event(fep);
+	fec_ptp_check_other_event(fep);
 
 	return ret;
 }
