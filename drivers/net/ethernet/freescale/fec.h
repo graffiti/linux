@@ -569,7 +569,7 @@ struct fec_enet_private {
 
 	bool perout_enabled[FEC_NB_CHANNELS];
 	u32 perout_period[FEC_NB_CHANNELS];
-	u64 perout_next[FEC_NB_CHANNELS];
+	u32 perout_next[FEC_NB_CHANNELS];
 };
 
 void fec_ptp_init(struct platform_device *pdev);
