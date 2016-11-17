@@ -86,6 +86,7 @@ enum ptp_pin_function {
 	PTP_PF_EXTTS,
 	PTP_PF_PEROUT,
 	PTP_PF_PHYSYNC,
+	PTP_PF_TIMER
 };
 
 struct ptp_pin_desc {

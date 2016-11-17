@@ -458,6 +458,10 @@ struct fec_enet_priv_rx_q {
 	struct bufdesc	*cur_rx;
 };
 
+//the 4 'pins' are the 4 1588_EVENT_IN/OUT_X signals
+#define FEC_NB_CHANNELS 4
+#define FEC_NB_SDP (FEC_NB_CHANNELS)
+
 /* The FEC buffer descriptors track the ring buffers.  The rx_bd_base and
  * tx_bd_base always point to the base of the buffer descriptors.  The
  * cur_rx and cur_tx point to the currently available buffer.
@@ -559,6 +563,13 @@ struct fec_enet_private {
 	unsigned int next_counter;
 
 	bool timer_enabled;
+	int timer_channel;
+
+	struct ptp_pin_desc sdp_config[FEC_NB_SDP];
+
+	bool perout_enabled[FEC_NB_CHANNELS];
+	u32 perout_period[FEC_NB_CHANNELS];
+	u32 perout_next[FEC_NB_CHANNELS];
 };
 
 void fec_ptp_init(struct platform_device *pdev);
@@ -566,7 +577,7 @@ void fec_ptp_start_cyclecounter(struct net_device *ndev);
 int fec_ptp_set(struct net_device *ndev, struct ifreq *ifr);
 int fec_ptp_get(struct net_device *ndev, struct ifreq *ifr);
 uint fec_ptp_check_pps_event(struct fec_enet_private *fep);
-uint fec_ptp_check_alarm_event(struct fec_enet_private *fep);
+void fec_ptp_check_other_event(struct fec_enet_private *fep);
 
 /****************************************************************************/
 #endif /* FEC_H */
