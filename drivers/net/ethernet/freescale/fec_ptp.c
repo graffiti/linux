@@ -98,8 +98,13 @@
 #define FEC_TCCR(n)		(0x60C + n * 0x08)
 #define MAX_TIMER_CHANNEL	3
 #define FEC_TMODE_DISABLED	0x00
+#define FEC_TMODE_INPUT_CAPTURE_RISING	0x1
+#define FEC_TMODE_INPUT_CAPTURE_FALLING	0x2
+#define FEC_TMODE_INPUT_CAPTURE_BOTH	0x3
 #define FEC_TMODE_SOFTWARE	0x04
 #define FEC_TMODE_TOGGLE	0x05
+
+
 #define FEC_HIGH_PULSE		0x0F
 
 #define FEC_CC_MULT	(1 << 31)
@@ -110,6 +115,7 @@
 
 static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable);
 static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsigned int chan, u32 period);
+static int fec_ptp_extts_enable(struct ptp_clock_info *ptp, bool enable, unsigned int chan);
 
 /**
  * fec_ptp_enable_pps
@@ -472,40 +478,11 @@ static int fec_ptp_enable(struct ptp_clock_info *ptp,
 {
 	struct fec_enet_private *fep =
 	    container_of(ptp, struct fec_enet_private, ptp_caps);
-	int pin = -1;
 
 	switch (rq->type)
 	{
 	case PTP_CLK_REQ_EXTTS:
-		if (on) {
-			pin = ptp_find_pin(fep->ptp_clock, PTP_PF_EXTTS,
-					rq->extts.index);
-			if (pin < 0)
-				return -EBUSY;
-		}
-/*		if (rq->extts.index == 1) {
-			tsauxc_mask = TSAUXC_EN_TS1;
-			tsim_mask = TSINTR_AUTT1;
-		} else {
-			tsauxc_mask = TSAUXC_EN_TS0;
-			tsim_mask = TSINTR_AUTT0;
-		}
-		spin_lock_irqsave(&igb->tmreg_lock, flags);
-		tsauxc = rd32(E1000_TSAUXC);
-		tsim = rd32(E1000_TSIM);
-		if (on) {
-			igb_pin_extts(igb, rq->extts.index, pin);
-			tsauxc |= tsauxc_mask;
-			tsim |= tsim_mask;
-		} else {
-			tsauxc &= ~tsauxc_mask;
-			tsim &= ~tsim_mask;
-		}
-		wr32(E1000_TSAUXC, tsauxc);
-		wr32(E1000_TSIM, tsim);
-		spin_unlock_irqrestore(&igb->tmreg_lock, flags);
-		*/
-		return 0;
+		return fec_ptp_extts_enable(ptp, on!=0, rq->extts.index);
 
 	case PTP_CLK_REQ_PEROUT:
 		return fec_ptp_perout_enable(ptp, on!=0, rq->perout.index, (rq->perout.period.sec * 1000000000) + rq->perout.period.nsec);
@@ -518,11 +495,6 @@ static int fec_ptp_enable(struct ptp_clock_info *ptp,
 	}
 
 	return -EOPNOTSUPP;
-
-
-
-
-
 }
 
 /**
@@ -615,70 +587,67 @@ static void fec_time_keep(struct work_struct *work)
 }
 
 /* tm_reg lock must be held for this call */
-bool fec_tc_enable(struct fec_enet_private *fep, bool enable, u64 ns)
+void fec_set_tmode(struct fec_enet_private *fep, unsigned int chan, u32 tmode, bool enableInt, bool clearTF)
+{
+	u32 val;
+
+	val = readl(fep->hwp + FEC_TCSR(chan));
+	if(clearTF)
+		val |= (1 << FEC_T_TF_OFFSET);
+	val &= ~(1 << FEC_T_TDRE_OFFSET);
+
+	if(enableInt)
+		val |= (1 << FEC_T_TIE_OFFSET);
+	else
+		val &= ~(1 << FEC_T_TIE_OFFSET);
+
+	val &= ~(FEC_T_TMODE_MASK);
+	val |= (tmode << FEC_T_TMODE_OFFSET);
+
+	writel(val, fep->hwp + FEC_TCSR(chan));
+
+	while( (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (tmode << FEC_T_TMODE_OFFSET) )
+	{
+	}
+	while (clearTF && (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TF_MASK))
+	{
+		//if for any reason TF fired while changing mode, clear it again
+		writel(val, fep->hwp + FEC_TCSR(chan));
+	}
+}
+
+/* tm_reg lock must be held for this call */
+bool fec_tc_enable(struct fec_enet_private *fep, u64 ns)
 {
 	u32 val;
 	u64 time_now, nsShifted;
 	int chan = fep->timer_channel;
 
-	if(enable)
-	{
-		//first disable it
-		fec_tc_enable(fep, false, 0);
+		//first disable the channel
+	fec_set_tmode(fep, chan, FEC_TMODE_DISABLED, false, true);
 
-		//set trigger time
+	//set trigger time
+	time_now = timecounter_read(&fep->tc);
+
+	nsShifted = ns - ((fep->tc.nsec & fep->cc.mask) - fep->tc.cycle_last);
+
+	val = nsShifted & fep->cc.mask;
+	writel(val, fep->hwp + FEC_TCCR(chan));
+
+	//enable
+	fec_set_tmode(fep, chan, FEC_TMODE_SOFTWARE, true, true);
+
+	if (ns!=0)
+	{
 		time_now = timecounter_read(&fep->tc);
 
-		nsShifted = ns - ((fep->tc.nsec & fep->cc.mask) - fep->tc.cycle_last);
-
-		val = nsShifted & fep->cc.mask;
-		writel(val, fep->hwp + FEC_TCCR(chan));
-
-		//enable
-		val = readl(fep->hwp + FEC_TCSR(chan));
-		val |= (1 << FEC_T_TF_OFFSET);
-		val |= (1 << FEC_T_TIE_OFFSET);
-		val &= ~(1 << FEC_T_TDRE_OFFSET);
-		val &= ~(FEC_T_TMODE_MASK);
-		val |= (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET);
-		writel(val, fep->hwp + FEC_TCSR(chan));
-
-		while(((readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (FEC_TMODE_SOFTWARE << FEC_T_TMODE_OFFSET)) )
+		if(time_now>ns)
 		{
+			//the event already passed
+			return false;
 		}
-
-		if (ns!=0)
-		{
-			time_now = timecounter_read(&fep->tc);
-
-			if(time_now>ns)
-			{
-				//the event already passed
-				return false;
-			}
-		}
-		return true;
 	}
-	else
-	{
-		//disable
-		val = readl(fep->hwp + FEC_TCSR(chan));
-		val |= (1 << FEC_T_TF_OFFSET);
-		val &= ~(1 << FEC_T_TDRE_OFFSET);
-		val &= ~(1 << FEC_T_TIE_OFFSET);
-		val &= ~(FEC_T_TMODE_MASK);
-		writel(val, fep->hwp + FEC_TCSR(chan));
-
-		while( (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (FEC_TMODE_DISABLED << FEC_T_TMODE_OFFSET) )
-		{
-		}
-		while (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TF_MASK)
-		{
-			//if for any reason TF fired while disabling, clear it again
-			writel(val, fep->hwp + FEC_TCSR(chan));
-		}
-		return true;
-	}
+	return true;
 }
 
 static int fec_ptp_timer_settime(struct ptp_clock_info *ptp,
@@ -697,10 +666,10 @@ static int fec_ptp_timer_settime(struct ptp_clock_info *ptp,
 	spin_lock_irqsave(&fep->tmreg_lock, irqsaveflags);
 
 	if(0 == ns)
-		fec_tc_enable(fep, false, 0);
+		fec_set_tmode(fep, fep->timer_channel, FEC_TMODE_DISABLED, false, true);
 
 	/* set trigger time and enable timer */
-	while ((ns !=0) && !fec_tc_enable(fep, true, ns))
+	while ((ns !=0) && !fec_tc_enable(fep, ns))
 	{
 		event.type = PTP_CLOCK_ALARM;
 		event.index = 0;
@@ -753,7 +722,7 @@ static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
 
 		spin_lock_irqsave(&fep->tmreg_lock, flags);
 		/* disable timer */
-		fec_tc_enable(fep, false, 0);
+		fec_set_tmode(fep, fep->timer_channel, FEC_TMODE_DISABLED, false, true);
 		fep->timer_enabled = false;
 		spin_unlock_irqrestore(&fep->tmreg_lock, flags);
 
@@ -780,21 +749,7 @@ static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsign
 		//disable
 		spin_lock_irqsave(&fep->tmreg_lock, flags);
 
-		val = readl(fep->hwp + FEC_TCSR(chan));
-		val |= (1 << FEC_T_TF_OFFSET);
-		val &= ~(1 << FEC_T_TDRE_OFFSET);
-		val &= ~(1 << FEC_T_TIE_OFFSET);
-		val &= ~(FEC_T_TMODE_MASK);
-		writel(val, fep->hwp + FEC_TCSR(chan));
-
-		while( (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (FEC_TMODE_DISABLED << FEC_T_TMODE_OFFSET) )
-		{
-		}
-		while (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TF_MASK)
-		{
-			//if for any reason TF fired while disabling, clear it again
-			writel(val, fep->hwp + FEC_TCSR(chan));
-		}
+		fec_set_tmode(fep, chan, FEC_TMODE_DISABLED, false, true);
 		fep->perout_enabled[chan] = false;
 
 		spin_unlock_irqrestore(&fep->tmreg_lock, flags);
@@ -823,16 +778,8 @@ static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsign
 	fep->perout_period[chan] = period;
 	fep->perout_enabled[chan] = true;
 
-	// clear capture or output compare interrupt status if have.
-	writel(FEC_T_TF_MASK, fep->hwp + FEC_TCSR(fep->pps_channel));
-
-	//ensure it's disabled to start with (taken from enable_pps)
-	val = readl(fep->hwp + FEC_TCSR(chan));
-	do {
-		val &= ~(FEC_T_TMODE_MASK);
-		writel(val, fep->hwp + FEC_TCSR(chan));
-		val = readl(fep->hwp + FEC_TCSR(chan));
-	} while (val & FEC_T_TMODE_MASK);
+	//first ensure the channel is disabled
+	fec_set_tmode(fep, chan, FEC_TMODE_DISABLED, false, true);
 
 	//set trigger time
 
@@ -853,17 +800,7 @@ static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsign
 	fep->perout_next[chan] &= fep->cc.mask;
 
 	//enable
-	val = readl(fep->hwp + FEC_TCSR(chan));
-	val |= (1 << FEC_T_TF_OFFSET);
-	val |= (1 << FEC_T_TIE_OFFSET);
-	val &= ~(1 << FEC_T_TDRE_OFFSET);
-	val &= ~(FEC_T_TMODE_MASK);
-	val |= (FEC_TMODE_TOGGLE << FEC_T_TMODE_OFFSET);
-	writel(val, fep->hwp + FEC_TCSR(chan));
-
-	while(((readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TMODE_MASK) != (FEC_TMODE_TOGGLE << FEC_T_TMODE_OFFSET)) )
-	{
-	}
+	fec_set_tmode(fep, chan, FEC_TMODE_TOGGLE, true, true);
 
 	//write the next time to fire
 	writel(fep->perout_next[chan], fep->hwp + FEC_TCCR(chan));
@@ -880,9 +817,43 @@ static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsign
 	return 0;
 }
 
+static int fec_ptp_extts_enable(struct ptp_clock_info *ptp, bool enable, unsigned int chan)
+{
+	struct fec_enet_private *fep =
+			container_of(ptp, struct fec_enet_private, ptp_caps);
+	unsigned long flags;
+	int pin;
+
+	pin = ptp_find_pin(fep->ptp_clock, PTP_PF_EXTTS, chan);
+	if (pin < 0)
+		return -EBUSY;
+
+	if (!enable)
+	{
+		spin_lock_irqsave(&fep->tmreg_lock, flags);
+		fec_set_tmode(fep, chan, FEC_TMODE_DISABLED, false, true);
+		fep->extts_enabled[chan] = false;
+		spin_unlock_irqrestore(&fep->tmreg_lock, flags);
+		return 0;
+	}
+
+	spin_lock_irqsave(&fep->tmreg_lock, flags);
+	fec_set_tmode(fep, chan, FEC_TMODE_INPUT_CAPTURE_RISING, true, true);
+	fep->extts_enabled[chan] = true;
+	spin_unlock_irqrestore(&fep->tmreg_lock, flags);
+
+	return 0;
+}
+
 static int fec_ptp_verify_pin(struct ptp_clock_info *ptp, unsigned int pin,
 			      enum ptp_pin_function func, unsigned int chan)
 {
+	//in this fec implementation there is an intrinsic link between pin and channel
+	// pin 0 == ENET_1588_EVENT0_IN/OUT == channel 0
+	// etc
+	if(pin != chan)
+		return -1;
+
 	//all pins can be EXTTS, PEROUT, TIMER, or NONE
 	switch (func)
 	{
@@ -952,6 +923,12 @@ void fec_ptp_init(struct platform_device *pdev)
 	fep->ptp_inc = NSEC_PER_SEC / fep->cycle_speed;
 	fep->timer_enabled = false;
 
+	for(i=0; i<FEC_NB_CHANNELS; i++)
+	{
+		fep->perout_enabled[i] = false;
+		fep->extts_enabled[i] = false;
+	}
+
 	spin_lock_init(&fep->tmreg_lock);
 
 	fec_ptp_start_cyclecounter(ndev);
@@ -968,6 +945,7 @@ void fec_ptp_init(struct platform_device *pdev)
 }
 
 //check for timer, periodic output and extts
+//NB: this is called in ISR context, no locking!
 void fec_ptp_check_other_event(struct fec_enet_private *fep)
 {
 	u32 val, tgsr;
@@ -998,10 +976,25 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
 				val = 1<<chan;
 				writel(val, fep->hwp + FEC_TGSR);
 			}
+			else if(fep->extts_enabled[chan])
+			{	//we received an external timestamp event
+
+				val = readl(fep->hwp + FEC_TCCR(chan));
+
+				event.timestamp = timecounter_cyc2time(&fep->tc, val);
+				event.type = PTP_CLOCK_EXTTS;
+				event.index = chan;
+				ptp_clock_event(fep->ptp_clock, &event);
+
+				//clear the TF flag
+				val = 1<<chan;
+				writel(val, fep->hwp + FEC_TGSR);
+			}
 			else if(fep->timer_enabled && (chan==fep->timer_channel))
 			{	//this is a posix timer int
 
-				fec_tc_enable(fep, false, 0);
+				//disable the timer channel
+				fec_set_tmode(fep, fep->timer_channel, FEC_TMODE_DISABLED, false, true);
 
 				event.alarm_time = ns_to_timespec64(timecounter_read(&fep->tc));
 				event.type = PTP_CLOCK_ALARM;
@@ -1015,7 +1008,7 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
 				ns = timespec64_to_ns(&event.alarm_time);
 
 				/* set trigger time and enable timer */
-				while ((ns !=0) && !fec_tc_enable(fep, true, ns))
+				while ((ns !=0) && !fec_tc_enable(fep, ns))
 				{
 					event.type = PTP_CLOCK_ALARM;
 					event.index = 0;
@@ -1025,6 +1018,13 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
 
 					//printk(KERN_ALERT "fec_ptp_check_alarm_event: time already passed, now setting to %llu\n", ns);
 				}
+			}
+			else
+			{
+				//if we get here we have a TF event, but no one is claiming responsibility for it
+				//just clear it
+				val = 1<<chan;
+				writel(val, fep->hwp + FEC_TGSR);
 			}
 		}
 	}
@@ -1037,6 +1037,7 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
  *
  * This function check the pps event and reload the timer compare counter.
  */
+//NB: this is called in ISR context, no locking!
 uint fec_ptp_check_pps_event(struct fec_enet_private *fep)
 {
 	u32 val;
