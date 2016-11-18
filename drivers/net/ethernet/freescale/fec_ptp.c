@@ -659,8 +659,6 @@ static int fec_ptp_timer_settime(struct ptp_clock_info *ptp,
 	unsigned long irqsaveflags;
 	struct ptp_clock_event event;
 
-	//printk(KERN_ALERT "fec_ptp_timer_settime: ts %d:%d\n", (int)ts->tv_sec, (int)ts->tv_nsec);
-
 	ns = timespec64_to_ns(ts);
 	mutex_lock(&fep->ptp_clk_mutex);
 	spin_lock_irqsave(&fep->tmreg_lock, irqsaveflags);
@@ -668,16 +666,14 @@ static int fec_ptp_timer_settime(struct ptp_clock_info *ptp,
 	if(0 == ns)
 		fec_set_tmode(fep, fep->timer_channel, FEC_TMODE_DISABLED, false, true);
 
-	/* set trigger time and enable timer */
+	// set trigger time and enable timer
 	while ((ns !=0) && !fec_tc_enable(fep, ns))
 	{
 		event.type = PTP_CLOCK_ALARM;
 		event.index = 0;
-		/* ptp_clock_event will return the next time to set */
+		// ptp_clock_event will return the next time to set
 		ptp_clock_event(fep->ptp_clock, &event);
 		ns = timespec64_to_ns(&event.alarm_time);
-
-		//printk(KERN_ALERT "fec_ptp_timer_settime: time already passed, now setting to %llu\n", ns);
 	}
 
 	spin_unlock_irqrestore(&fep->tmreg_lock, irqsaveflags);
@@ -692,31 +688,8 @@ static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
 	unsigned long flags;
 	int pin, chan;
 
-	//find the channel for the timer
-	for(chan=0; chan<FEC_NB_CHANNELS; chan++)
+	if(!enable)
 	{
-		pin = ptp_find_pin(fep->ptp_clock, PTP_PF_TIMER, chan);
-		if(pin>=0)
-			break;
-	}
-	if (pin < 0)
-			return -EBUSY;
-
-	if (enable)
-	{
-		if (!fep->timer_enabled)
-		{
-			spin_lock_irqsave(&fep->tmreg_lock, flags);
-			fep->timer_channel = chan;
-			fep->timer_enabled = true;
-			spin_unlock_irqrestore(&fep->tmreg_lock, flags);
-
-			//printk(KERN_ALERT "fec: timer enabled\n");
-			return 0;
-		}
-		/* timer is already enabled */
-		return -EINVAL;
-	} else {
 		if (!fep->timer_enabled)
 			return -EINVAL;
 
@@ -726,10 +699,31 @@ static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
 		fep->timer_enabled = false;
 		spin_unlock_irqrestore(&fep->tmreg_lock, flags);
 
-		//printk(KERN_ALERT "fec: timer disabled\n");
+		return 0;
 	}
 
-	return 0;
+	//find the channel for the timer
+	//nb: don't call ptp_find_pin when enable==false, or you'll get a mutex lock from ptp_disable_pinfunc
+	for(chan=0; chan<FEC_NB_CHANNELS; chan++)
+	{
+		pin = ptp_find_pin(fep->ptp_clock, PTP_PF_TIMER, chan);
+		if(pin>=0)
+			break;
+	}
+	if (pin < 0)
+			return -EBUSY;
+
+	if (!fep->timer_enabled)
+	{
+		spin_lock_irqsave(&fep->tmreg_lock, flags);
+		fep->timer_channel = chan;
+		fep->timer_enabled = true;
+		spin_unlock_irqrestore(&fep->tmreg_lock, flags);
+
+		return 0;
+	}
+	// timer was already enabled
+	return -EINVAL;
 }
 
 static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsigned int chan, u32 period)
@@ -739,10 +733,6 @@ static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsign
 	unsigned long flags;
 	u32 val;
 	int pin;
-
-	pin = ptp_find_pin(fep->ptp_clock, PTP_PF_PEROUT, chan);
-	if (pin < 0)
-		return -EBUSY;
 
 	if(!enable)
 	{
@@ -756,6 +746,11 @@ static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsign
 
 		return 0;
 	}
+
+	//nb: don't call ptp_find_pin when enable==false, or you'll get a mutex lock from ptp_disable_pinfunc
+	pin = ptp_find_pin(fep->ptp_clock, PTP_PF_PEROUT, chan);
+	if (pin < 0)
+		return -EBUSY;
 
 	period = period >> 1;
 
@@ -812,8 +807,6 @@ static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsign
 	spin_unlock_irqrestore(&fep->tmreg_lock, flags);
 	mutex_unlock(&fep->ptp_clk_mutex);
 
-	//printk(KERN_ALERT "periodic output enabled on channel %d with period %d ns\n", chan, period);
-
 	return 0;
 }
 
@@ -824,10 +817,6 @@ static int fec_ptp_extts_enable(struct ptp_clock_info *ptp, bool enable, unsigne
 	unsigned long flags;
 	int pin;
 
-	pin = ptp_find_pin(fep->ptp_clock, PTP_PF_EXTTS, chan);
-	if (pin < 0)
-		return -EBUSY;
-
 	if (!enable)
 	{
 		spin_lock_irqsave(&fep->tmreg_lock, flags);
@@ -836,6 +825,11 @@ static int fec_ptp_extts_enable(struct ptp_clock_info *ptp, bool enable, unsigne
 		spin_unlock_irqrestore(&fep->tmreg_lock, flags);
 		return 0;
 	}
+
+	//nb: don't call ptp_find_pin when enable==false, or you'll get a mutex lock from ptp_disable_pinfunc
+	pin = ptp_find_pin(fep->ptp_clock, PTP_PF_EXTTS, chan);
+	if (pin < 0)
+		return -EBUSY;
 
 	spin_lock_irqsave(&fep->tmreg_lock, flags);
 	fec_set_tmode(fep, chan, FEC_TMODE_INPUT_CAPTURE_RISING, true, true);
@@ -1000,9 +994,7 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
 				event.type = PTP_CLOCK_ALARM;
 				event.index = 0;
 
-				//printk(KERN_ALERT "fec_ptp_check_alarm_event: got timer int sending event ts %d:%d\n", (int)event.alarm_time.tv_sec, event.alarm_time.tv_nsec);
-
-				/* ptp_clock_event will return the next time to set */
+				// ptp_clock_event will return the next time to set
 				ptp_clock_event(fep->ptp_clock, &event);
 
 				ns = timespec64_to_ns(&event.alarm_time);
@@ -1012,11 +1004,9 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
 				{
 					event.type = PTP_CLOCK_ALARM;
 					event.index = 0;
-					/* ptp_clock_event will return the next time to set */
+					// ptp_clock_event will return the next time to set
 					ptp_clock_event(fep->ptp_clock, &event);
 					ns = timespec64_to_ns(&event.alarm_time);
-
-					//printk(KERN_ALERT "fec_ptp_check_alarm_event: time already passed, now setting to %llu\n", ns);
 				}
 			}
 			else
