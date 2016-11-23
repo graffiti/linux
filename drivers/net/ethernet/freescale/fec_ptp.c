@@ -1028,7 +1028,7 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
  * This function check the pps event and reload the timer compare counter.
  */
 //NB: this is called in ISR context, no locking!
-uint fec_ptp_check_pps_event(struct fec_enet_private *fep)
+void fec_ptp_check_pps_event(struct fec_enet_private *fep)
 {
 	u32 val;
 	u8 channel = fep->pps_channel;
@@ -1049,8 +1049,5 @@ uint fec_ptp_check_pps_event(struct fec_enet_private *fep)
 
 		event.type = PTP_CLOCK_PPS;
 		ptp_clock_event(fep->ptp_clock, &event);
-		return 1;
 	}
-
-	return 0;
 }

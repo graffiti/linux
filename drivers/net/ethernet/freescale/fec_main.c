@@ -1581,14 +1581,12 @@ fec_enet_interrupt(int irq, void *dev_id)
 	struct net_device *ndev = dev_id;
 	struct fec_enet_private *fep = netdev_priv(ndev);
 	uint int_events;
-	irqreturn_t ret = IRQ_NONE;
 
 	int_events = readl(fep->hwp + FEC_IEVENT);
 	writel(int_events, fep->hwp + FEC_IEVENT);
 	fec_enet_collect_events(fep, int_events);
 
 	if ((fep->work_tx || fep->work_rx) && fep->link) {
-		ret = IRQ_HANDLED;
 
 		if (napi_schedule_prep(&fep->napi)) {
 			/* Disable the NAPI interrupts */
@@ -1597,17 +1595,15 @@ fec_enet_interrupt(int irq, void *dev_id)
 		}
 	}
 
-	if (int_events & FEC_ENET_MII) {
-		ret = IRQ_HANDLED;
+	if (int_events & FEC_ENET_MII)
 		complete(&fep->mdio_done);
-	}
 
 	if (fep->ptp_clock && fep->pps_enable)
 		fec_ptp_check_pps_event(fep);
 
 	fec_ptp_check_other_event(fep);
 
-	return ret;
+	return IRQ_HANDLED;
 }
 
 static int fec_enet_rx_napi(struct napi_struct *napi, int budget)
