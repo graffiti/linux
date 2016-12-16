@@ -224,6 +224,14 @@ static int ptp_timer_create(struct posix_clock *pc, struct k_itimer *kit)
 	if (ptp->info->enable == 0)
 		return -EOPNOTSUPP;
 
+
+	//kjt - EVEN BETTER
+	//do findpin here, and put index in ptp_clock_request (reuse extts struct or add new)
+	//and remove findpin from fec_ptp_enable
+
+
+
+	//kjt todo move this...
 	spin_lock_irqsave(&ptp->tq_lock, tq_lock_flags);
 
 	if (ptp->number_of_timers == 0) {
@@ -231,6 +239,8 @@ static int ptp_timer_create(struct posix_clock *pc, struct k_itimer *kit)
 		rq.type = PTP_CLK_REQ_ALARM;
 		err = ptp->info->enable(ptp->info, &rq, 1);
 	}
+
+	//kjt todo to here... (in fact, put the spinlock inside the if()
 
 	if (err == 0) {
 		timerqueue_init(&kit->it.real.timer.node);
@@ -259,6 +269,8 @@ static int ptp_timer_delete(struct posix_clock *pc, struct k_itimer *kit)
 
 	ptp->number_of_timers--;
 
+	//kjt todo to here (from below)
+
 	if (ptp->number_of_timers == 0) {
 		/* there are no more timers set on this device,
 		 * so we can disable the hardware timer
@@ -267,6 +279,7 @@ static int ptp_timer_delete(struct posix_clock *pc, struct k_itimer *kit)
 		err = ptp->info->enable(ptp->info, &rq, 0);
 	}
 
+	//kjt todo move this up...
 	spin_unlock_irqrestore(&ptp->tq_lock, tq_lock_flags);
 
 	return err;
