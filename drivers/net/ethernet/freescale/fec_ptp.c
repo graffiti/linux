@@ -113,7 +113,7 @@
 #define FEC_CHANNLE_0		0
 #define DEFAULT_PPS_CHANNEL	FEC_CHANNLE_0
 
-static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable);
+static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable, unsigned int chan);
 static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsigned int chan, u32 period);
 static int fec_ptp_extts_enable(struct ptp_clock_info *ptp, bool enable, unsigned int chan);
 
@@ -488,7 +488,7 @@ static int fec_ptp_enable(struct ptp_clock_info *ptp,
 		return fec_ptp_perout_enable(ptp, on!=0, rq->perout.index, (rq->perout.period.sec * 1000000000) + rq->perout.period.nsec);
 
 	case PTP_CLK_REQ_ALARM:
-		return fec_ptp_timer_enable(ptp, on!=0);
+		return fec_ptp_timer_enable(ptp, on!=0, rq->perout.index);
 
 	case PTP_CLK_REQ_PPS:
 		return fec_ptp_enable_pps(fep, on);
@@ -681,12 +681,11 @@ static int fec_ptp_timer_settime(struct ptp_clock_info *ptp,
 	return 0;
 }
 
-static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
+static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable, unsigned int chan)
 {
 	struct fec_enet_private *fep =
 			    container_of(ptp, struct fec_enet_private, ptp_caps);
 	unsigned long flags;
-	int pin, chan;
 
 	if(!enable)
 	{
@@ -701,17 +700,6 @@ static int fec_ptp_timer_enable(struct ptp_clock_info *ptp, bool enable)
 
 		return 0;
 	}
-
-	//find the channel for the timer
-	//nb: don't call ptp_find_pin when enable==false, or you'll get a mutex lock from ptp_disable_pinfunc
-	for(chan=0; chan<FEC_NB_CHANNELS; chan++)
-	{
-		pin = ptp_find_pin(fep->ptp_clock, PTP_PF_TIMER, chan);
-		if(pin>=0)
-			break;
-	}
-	if (pin < 0)
-			return -EBUSY;
 
 	if (!fep->timer_enabled)
 	{
