@@ -105,7 +105,7 @@
 #define FEC_TMODE_TOGGLE	0x05
 
 
-#define FEC_HIGH_PULSE		0x0F
+#define FEC_TMODE_HIGH_PULSE		0x0F
 
 #define FEC_CC_MULT	(1 << 31)
 #define FEC_COUNTER_PERIOD	(1 << 31)
@@ -223,7 +223,7 @@ static int fec_ptp_enable_pps(struct fec_enet_private *fep, uint enable)
 		val |= (1 << FEC_T_TF_OFFSET | 1 << FEC_T_TIE_OFFSET);
 		val &= ~(1 << FEC_T_TDRE_OFFSET);
 		val &= ~(FEC_T_TMODE_MASK);
-		val |= (FEC_HIGH_PULSE << FEC_T_TMODE_OFFSET);
+		val |= (FEC_TMODE_HIGH_PULSE << FEC_T_TMODE_OFFSET);
 		writel(val, fep->hwp + FEC_TCSR(fep->pps_channel));
 
 		/* Write the second compare event timestamp and calculate
@@ -740,7 +740,8 @@ static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsign
 	if (pin < 0)
 		return -EBUSY;
 
-	period = period >> 1;
+	//if you need 50% duty cycle, half the period and set to toggle below
+	//period = period >> 1;
 
 	if (period < 15625)	//32kHz max
 		return -EINVAL;
@@ -783,7 +784,8 @@ static int fec_ptp_perout_enable(struct ptp_clock_info *ptp, bool enable, unsign
 	fep->perout_next[chan] &= fep->cc.mask;
 
 	//enable
-	fec_set_tmode(fep, chan, FEC_TMODE_TOGGLE, true, true);
+	//use FEC_TMODE_TOGGLE here for 50% duty
+	fec_set_tmode(fep, chan, FEC_TMODE_HIGH_PULSE, true, true);
 
 	//write the next time to fire
 	writel(fep->perout_next[chan], fep->hwp + FEC_TCCR(chan));
@@ -951,8 +953,7 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
 				writel(fep->perout_next[chan], fep->hwp + FEC_TCCR(chan));
 
 				//update the next time
-				fep->perout_next[chan] += fep->perout_period[chan];
-				fep->perout_next[chan] &= fep->cc.mask;
+				fep->perout_next[chan] = (fep->perout_next[chan] + fep->perout_period[chan]) & fep->cc.mask;
 
 				//clear the TF flag
 				val = 1<<chan;
