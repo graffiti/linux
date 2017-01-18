@@ -928,6 +928,29 @@ void fec_ptp_init(struct platform_device *pdev)
 	schedule_delayed_work(&fep->time_keep, HZ);
 }
 
+void clearTF(struct fec_enet_private *fep, int chan)
+{
+	//using shadow register
+	u32 val = 1<<chan;
+	do
+	{
+		writel(val, fep->hwp + FEC_TGSR);
+	}while(readl(fep->hwp + FEC_TGSR) & val);
+
+
+	/*
+	 //not using shadow register
+	 u32 val = readl(fep->hwp + FEC_TCSR(chan));
+	if (val & FEC_T_TF_MASK)
+	{
+		do
+		{
+			writel(val, fep->hwp + FEC_TCSR(chan));
+		} while (readl(fep->hwp + FEC_TCSR(chan)) & FEC_T_TF_MASK);
+	}
+	 */
+}
+
 //check for timer, periodic output and extts
 //NB: this is called in ISR context, no locking!
 void fec_ptp_check_other_event(struct fec_enet_private *fep)
@@ -956,8 +979,7 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
 				fep->perout_next[chan] = (fep->perout_next[chan] + fep->perout_period[chan]) & fep->cc.mask;
 
 				//clear the TF flag
-				val = 1<<chan;
-				writel(val, fep->hwp + FEC_TGSR);
+				clearTF(fep, chan);
 			}
 			else if(fep->extts_enabled[chan])
 			{	//we received an external timestamp event
@@ -970,8 +992,7 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
 				ptp_clock_event(fep->ptp_clock, &event);
 
 				//clear the TF flag
-				val = 1<<chan;
-				writel(val, fep->hwp + FEC_TGSR);
+				clearTF(fep, chan);
 			}
 			else if(fep->timer_enabled && (chan==fep->timer_channel))
 			{	//this is a posix timer int
@@ -1002,8 +1023,7 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
 			{
 				//if we get here we have a TF event, but no one is claiming responsibility for it
 				//just clear it
-				val = 1<<chan;
-				writel(val, fep->hwp + FEC_TGSR);
+				clearTF(fep, chan);
 			}
 		}
 	}

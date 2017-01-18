@@ -1582,27 +1582,37 @@ fec_enet_interrupt(int irq, void *dev_id)
 	struct fec_enet_private *fep = netdev_priv(ndev);
 	uint int_events;
 
-	fec_ptp_check_other_event(fep);
+	//this fec implementation registers this interrupt handler for all interrupts
+	//associated with the ENET peripheral. This can be up to 3 different ints.
+	//different int handlers can be spawned across different cores (or nested on the same core)
+	//causing concurrency issues. Our fix is to only service timer ints on a timer int,
+	//and other ints on another int... it would be better to have two separate ISRs...
+	//NB, this is hard coded for imx6
+	if(281 == irq)
+	{
+		fec_ptp_check_other_event(fep);
 
-	int_events = readl(fep->hwp + FEC_IEVENT);
-	writel(int_events, fep->hwp + FEC_IEVENT);
-	fec_enet_collect_events(fep, int_events);
-
-	if ((fep->work_tx || fep->work_rx) && fep->link) {
-
-		if (napi_schedule_prep(&fep->napi)) {
-			// Disable the NAPI interrupts
-			writel(FEC_ENET_MII, fep->hwp + FEC_IMASK);
-			__napi_schedule(&fep->napi);
-		}
+		if (fep->ptp_clock && fep->pps_enable)
+					fec_ptp_check_pps_event(fep);
 	}
+	else
+	{
+		int_events = readl(fep->hwp + FEC_IEVENT);
+		writel(int_events, fep->hwp + FEC_IEVENT);
+		fec_enet_collect_events(fep, int_events);
 
-	if (int_events & FEC_ENET_MII)
-		complete(&fep->mdio_done);
+		if ((fep->work_tx || fep->work_rx) && fep->link) {
 
-	if (fep->ptp_clock && fep->pps_enable)
-		fec_ptp_check_pps_event(fep);
+			if (napi_schedule_prep(&fep->napi)) {
+				// Disable the NAPI interrupts
+				writel(FEC_ENET_MII, fep->hwp + FEC_IMASK);
+				__napi_schedule(&fep->napi);
+			}
+		}
 
+		if (int_events & FEC_ENET_MII)
+			complete(&fep->mdio_done);
+	}
 	return IRQ_HANDLED;
 }
 
