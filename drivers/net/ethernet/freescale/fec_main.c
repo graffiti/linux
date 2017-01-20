@@ -925,6 +925,9 @@ fec_restart(struct net_device *ndev)
 	u32 rcntl = OPT_FRAME_SIZE | 0x04;
 	u32 ecntl = 0x2; /* ETHEREN */
 
+	printk(KERN_ALERT "fec_restart\n");
+	printk(KERN_ALERT "before restart ENET_ATCR = %u\n", readl(fep->hwp + 0x400));
+
 	/* Whack a reset.  We should wait for this.
 	 * For i.MX6SX SOC, enet use AXI bus, we use disable MAC
 	 * instead of reset MAC itself.
@@ -935,6 +938,8 @@ fec_restart(struct net_device *ndev)
 		writel(1, fep->hwp + FEC_ECNTRL);
 		udelay(10);
 	}
+
+	printk(KERN_ALERT "after restart ENET_ATCR = %u\n", readl(fep->hwp + 0x400));
 
 	/*
 	 * enet-mac reset will reset mac address registers too,
@@ -1085,10 +1090,10 @@ fec_restart(struct net_device *ndev)
 		fec_ptp_start_cyclecounter(ndev);
 
 	/* Enable interrupts we wish to service */
-	if (fep->link)
+	//if (fep->link)
 		writel(FEC_DEFAULT_IMASK, fep->hwp + FEC_IMASK);
-	else
-		writel(FEC_ENET_MII, fep->hwp + FEC_IMASK);
+	//else
+	//	writel(FEC_ENET_MII, fep->hwp + FEC_IMASK);
 
 	/* Init the interrupt coalescing */
 	fec_enet_itr_coal_init(ndev);
@@ -1102,6 +1107,8 @@ fec_stop(struct net_device *ndev)
 	struct fec_platform_data *pdata = fep->pdev->dev.platform_data;
 	u32 rmii_mode = readl(fep->hwp + FEC_R_CNTRL) & (1 << 8);
 	u32 val;
+
+	printk(KERN_ALERT "fec_stop\n");
 
 	/* We cannot expect a graceful transmit stop without link !!! */
 	if (fep->link) {
@@ -1705,6 +1712,94 @@ static void fec_get_mac(struct net_device *ndev)
 
 /* ------------------------------------------------------------------------- */
 
+//the mainline driver resets the FEC whenever the link status changes (including
+//speed/duplex changes). We can't have that, as a FEC reset also resets the
+//timers, periodic output and measurement channels. So we leave the FEC alone
+//when the link state changes, and just change the duplex and speed as required
+static void setDuplexAndSpeed(struct net_device *ndev)
+{
+	struct fec_enet_private *fep = netdev_priv(ndev);
+	struct phy_device *phy_dev = fep->phy_dev;
+	u32 ecr;
+	u32 rcr;
+
+	printk(KERN_ALERT "fec: setDuplexAndSpeed, duplex was %d, now %d, speed was %d, now %d\n", fep->full_duplex, phy_dev->duplex, fep->speed, phy_dev->speed);
+
+	fep->full_duplex = phy_dev->duplex;
+	fep->speed = phy_dev->speed;
+
+	napi_disable(&fep->napi);
+	netif_tx_lock_bh(ndev);
+
+	if(0)
+	{
+		printk(KERN_ALERT "fec: setDuplexAndSpeed before reset, ECR = %u, RCR = %u\n", readl(fep->hwp + FEC_ECNTRL), readl(fep->hwp + FEC_R_CNTRL));
+		fec_restart(ndev);
+		printk(KERN_ALERT "fec: setDuplexAndSpeed after reset, ECR = %u, RCR = %u\n", readl(fep->hwp + FEC_ECNTRL), readl(fep->hwp + FEC_R_CNTRL));
+	}
+	else
+	{
+		printk(KERN_ALERT "fec: setDuplexAndSpeed, ECR = %u, RCR = %u\n", readl(fep->hwp + FEC_ECNTRL), readl(fep->hwp + FEC_R_CNTRL));
+
+		//disable ETHEREN
+		ecr = readl(fep->hwp + FEC_ECNTRL);
+		ecr &= ~2;
+		writel(ecr, fep->hwp + FEC_ECNTRL);
+
+		/* Clear any outstanding interrupt. */
+		//todo kjt keep timer ints alive
+		//writel(0xffffffff, fep->hwp + FEC_IEVENT);
+
+		//read current state of rcr
+		rcr = readl(fep->hwp + FEC_R_CNTRL);
+
+		/* Enable MII mode */
+		if (fep->full_duplex == DUPLEX_FULL) {
+			/* FD enable */
+			rcr &= ~0x02;
+			writel(0x04, fep->hwp + FEC_X_CNTRL);
+		} else {
+			/* No Rcv on Xmit */
+			rcr |= 0x02;
+			writel(0x0, fep->hwp + FEC_X_CNTRL);
+		}
+
+		if (fep->quirks & FEC_QUIRK_ENET_MAC)
+		{
+			/* 1G, 100M or 10M */
+			if (fep->phy_dev)
+			{
+				if (fep->phy_dev->speed == SPEED_1000)
+					ecr |= (1 << 5);
+				else if (fep->phy_dev->speed == SPEED_100)
+				{
+					ecr &= ~(1 << 5);
+					rcr &= ~(1 << 9);
+				}
+				else
+				{
+					ecr &= ~(1 << 5);
+					rcr |= (1 << 9);
+				}
+			}
+		}
+
+		writel(rcr, fep->hwp + FEC_R_CNTRL);
+
+		//reenable ETHEREN and any other bits
+		ecr |= 2;
+		writel(ecr, fep->hwp + FEC_ECNTRL);
+
+		printk(KERN_ALERT "fec: setDuplexAndSpeed, ECR = %u, RCR = %u\n", readl(fep->hwp + FEC_ECNTRL), readl(fep->hwp + FEC_R_CNTRL));
+
+	}
+
+
+	netif_wake_queue(ndev);
+	netif_tx_unlock_bh(ndev);
+	napi_enable(&fep->napi);
+}
+
 /*
  * Phy section
  */
@@ -1733,33 +1828,29 @@ static void fec_enet_adjust_link(struct net_device *ndev)
 			status_change = 1;
 		}
 
-		if (fep->full_duplex != phy_dev->duplex) {
-			fep->full_duplex = phy_dev->duplex;
-			status_change = 1;
-		}
-
-		if (phy_dev->speed != fep->speed) {
-			fep->speed = phy_dev->speed;
+		if ((fep->full_duplex != phy_dev->duplex) || (phy_dev->speed != fep->speed))
+		{
+			setDuplexAndSpeed(ndev);
 			status_change = 1;
 		}
 
 		/* if any of the above changed restart the FEC */
-		if (status_change) {
+		/*if (status_change) {
 			napi_disable(&fep->napi);
 			netif_tx_lock_bh(ndev);
-			fec_restart(ndev);
+			//fec_restart(ndev);
 			netif_wake_queue(ndev);
 			netif_tx_unlock_bh(ndev);
 			napi_enable(&fep->napi);
-		}
+		}*/
 	} else {
 		if (fep->link) {
-			napi_disable(&fep->napi);
+		/*	napi_disable(&fep->napi);
 			netif_tx_lock_bh(ndev);
-			fec_stop(ndev);
+			//fec_stop(ndev);
 			netif_tx_unlock_bh(ndev);
 			napi_enable(&fep->napi);
-			fep->link = phy_dev->link;
+			fep->link = phy_dev->link;*/
 			status_change = 1;
 		}
 	}

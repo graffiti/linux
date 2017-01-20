@@ -997,6 +997,8 @@ void fec_ptp_check_other_event(struct fec_enet_private *fep)
 			else if(fep->timer_enabled && (chan==fep->timer_channel))
 			{	//this is a posix timer int
 
+				printk(KERN_ALERT "fec int fec_ptp_check_other_event TIMER fired\n");
+
 				//disable the timer channel
 				fec_set_tmode(fep, fep->timer_channel, FEC_TMODE_DISABLED, false, true);
 
