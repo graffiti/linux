@@ -120,6 +120,7 @@ static void igb_free_all_tx_resources(struct igb_adapter *);
 static void igb_free_all_rx_resources(struct igb_adapter *);
 static void igb_setup_mrqc(struct igb_adapter *);
 static int igb_probe(struct pci_dev *, const struct pci_device_id *);
+static int igb_init_qav_mode(struct e1000_hw *hw);
 static void igb_remove(struct pci_dev *pdev);
 static int igb_sw_init(struct igb_adapter *);
 static int igb_open(struct net_device *);
@@ -2433,7 +2434,14 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* configure RXPBSIZE and TXPBSIZE */
 	if (hw->mac.type == e1000_i210) {
 		wr32(E1000_RXPBS, I210_RXPBSIZE_DEFAULT);
-		wr32(E1000_TXPBS, I210_TXPBSIZE_DEFAULT);
+
+		//kjt use legacy or qav mode
+		if(0)
+		{
+			wr32(E1000_TXPBS, I210_TXPBSIZE_DEFAULT);
+		}
+		else
+			igb_init_qav_mode(hw);
 	}
 
 	setup_timer(&adapter->watchdog_timer, igb_watchdog,
@@ -8169,5 +8177,56 @@ int igb_reinit_queues(struct igb_adapter *adapter)
 		err = igb_open(netdev);
 
 	return err;
+}
+
+static int igb_init_qav_mode(struct e1000_hw *hw)
+{
+	u32	tqavctrl;
+	u32	tqavcc0, tqavcc1;
+	u32	tqavhc0, tqavhc1;
+	u32	txpbsize;
+
+
+	//total tx buffer size is 24KB. We allocate 20KB to queue 0, and 4K to queue 3
+	txpbsize = (20) << E1000_TXPBSIZE_TX0PB_SHIFT;
+	txpbsize |= (0) << E1000_TXPBSIZE_TX1PB_SHIFT;
+	txpbsize |= (0) << E1000_TXPBSIZE_TX2PB_SHIFT;
+	txpbsize |= (4) << E1000_TXPBSIZE_TX3PB_SHIFT;
+
+	wr32(E1000_TXPBS, txpbsize); //I210_TXPBSIZE_DEFAULT);
+
+	/* std sized frames in 64 byte units with VLAN tags applied */
+	wr32(E1000_DTXMXPKTSZ, 1536 / 64);
+
+	/*
+	 * this function defaults the QAV shaper to OFF (TX_ARB=0)
+	 * user-mode library can reconfigure thresholds and enable
+	 * after the device has started.
+	 */
+
+	tqavcc0 = E1000_TQAVCC_QUEUEMODE; /* no idle slope */
+	tqavcc1 = E1000_TQAVCC_QUEUEMODE; /* no idle slope */
+	tqavhc0 = 0xFFFFFFFF; /* unlimited credits */
+	tqavhc1 = 0xFFFFFFFF; /* unlimited credits */
+
+	wr32(E1000_I210_TQAVCC(0), tqavcc0);
+	wr32(E1000_I210_TQAVCC(1), tqavcc1);
+	wr32(E1000_I210_TQAVHC(0), tqavhc0);
+	wr32(E1000_I210_TQAVHC(1), tqavhc1);
+
+	tqavctrl = E1000_TQAVCTRL_TXMODE |
+		   E1000_TQAVCTRL_DATA_FETCH_ARB |
+		   E1000_TQAVCTRL_DATA_TRAN_ARB |
+		   E1000_TQAVCTRL_DATA_TRAN_TIM |
+		   E1000_TQAVCTRL_SP_WAIT_SR;
+
+	/* default to a 10 usec prefetch delta from launch time - time for
+	 * a 1500 byte rx frame to be received over the PCIe Gen1 x1 link.
+	 */
+	tqavctrl |= (10 << 5) << E1000_TQAVCTRL_FETCH_TM_SHIFT;
+
+	wr32(E1000_I210_TQAVCTRL, tqavctrl);
+
+	return 0;
 }
 /* igb_main.c */

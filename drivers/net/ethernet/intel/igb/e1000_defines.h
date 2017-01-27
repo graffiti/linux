@@ -1019,4 +1019,20 @@
 #define E1000_RTTBCNRC_RF_INT_MASK	\
 	(E1000_RTTBCNRC_RF_DEC_MASK << E1000_RTTBCNRC_RF_INT_SHIFT)
 
+#define E1000_TQAVCC_QUEUEMODE         0x80000000 /* queue mode, 0=strict, 1=SR mode */
+#define E1000_TQAVCTRL_TXMODE          0x00000001 /* Transmit mode, 0=legacy, 1=QAV */
+#define E1000_TQAVCTRL_1588_STAT_EN    0x00000004 /* report DMA time of tx packets */
+#define E1000_TQAVCTRL_DATA_FETCH_ARB  0x00000010 /* data fetch arbitration */
+#define E1000_TQAVCTRL_DATA_TRAN_ARB   0x00000100 /* data tx arbitration */
+#define E1000_TQAVCTRL_DATA_TRAN_TIM   0x00000200 /* data launch time valid */
+#define E1000_TQAVCTRL_SP_WAIT_SR      0x00000400 /* stall SP to guarantee SR */
+#define E1000_TQAVCTRL_FETCH_TM_SHIFT  (16)       /* ... and associated shift value */
+
+/* Tx packet buffer fields */
+#define E1000_TXPBSIZE_PBSZ_MASK      0x3F
+#define E1000_TXPBSIZE_TX0PB_SHIFT    0
+#define E1000_TXPBSIZE_TX1PB_SHIFT    6
+#define E1000_TXPBSIZE_TX2PB_SHIFT    12
+#define E1000_TXPBSIZE_TX3PB_SHIFT    18
+
 #endif
