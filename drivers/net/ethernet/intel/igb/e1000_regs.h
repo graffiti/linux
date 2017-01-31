@@ -87,16 +87,17 @@
 #define E1000_MPHY_STAT		0x0E0C /* GBE MPHY Statistics */
 
 #define E1000_DTXMXPKTSZ	0x0355C
-#define E1000_I210_TQAVCTRL	0x3570
+#define E1000_TQAVCTRL	0x3570
+
 /* High credit registers where _n can be 0 or 1. */
-#define E1000_I210_TQAVHC(_n)			(0x300C + 0x40 * (_n))
+#define E1000_TQAVHC(_n)			(0x300C + 0x40 * (_n))
 
 /* Queues fetch arbitration priority control register */
 #define E1000_I210_TQAVARBCTRL			0x3574
 /* Queues priority masks where _n and _p can be 0-3. */
 #define E1000_TQAVARBCTRL_QUEUE_PRI(_n, _p)	((_p) << (2 * (_n)))
 /* QAV Tx mode control registers where _n can be 0 or 1. */
-#define E1000_I210_TQAVCC(_n)			(0x3004 + 0x40 * (_n))
+#define E1000_TQAVCC(_n)			(0x3004 + 0x40 * (_n))
 
 /* QAV Tx mode control register bitfields masks */
 #define E1000_TQAVCC_IDLE_SLOPE		0xFFFF /* Idle slope */

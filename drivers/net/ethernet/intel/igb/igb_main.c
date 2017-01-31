@@ -177,6 +177,8 @@ static int igb_ndo_get_vf_config(struct net_device *netdev, int vf,
 				 struct ifla_vf_info *ivi);
 static void igb_check_vf_rate_limit(struct igb_adapter *);
 
+static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate);
+
 #ifdef CONFIG_PCI_IOV
 static int igb_vf_configure(struct igb_adapter *adapter, int vf);
 static int igb_pci_enable_sriov(struct pci_dev *dev, int num_vfs);
@@ -2090,6 +2092,7 @@ static const struct net_device_ops igb_netdev_ops = {
 	.ndo_fix_features	= igb_fix_features,
 	.ndo_set_features	= igb_set_features,
 	.ndo_features_check	= passthru_features_check,
+	.ndo_set_tx_maxrate = igb_set_tx_maxrate,
 };
 
 /**
@@ -8209,10 +8212,10 @@ static int igb_init_qav_mode(struct e1000_hw *hw)
 	tqavhc0 = 0xFFFFFFFF; /* unlimited credits */
 	tqavhc1 = 0xFFFFFFFF; /* unlimited credits */
 
-	wr32(E1000_I210_TQAVCC(0), tqavcc0);
-	wr32(E1000_I210_TQAVCC(1), tqavcc1);
-	wr32(E1000_I210_TQAVHC(0), tqavhc0);
-	wr32(E1000_I210_TQAVHC(1), tqavhc1);
+	wr32(E1000_TQAVCC(0), tqavcc0);
+	wr32(E1000_TQAVCC(1), tqavcc1);
+	wr32(E1000_TQAVHC(0), tqavhc0);
+	wr32(E1000_TQAVHC(1), tqavhc1);
 
 	tqavctrl = E1000_TQAVCTRL_TXMODE |
 		   E1000_TQAVCTRL_DATA_FETCH_ARB |
@@ -8225,8 +8228,112 @@ static int igb_init_qav_mode(struct e1000_hw *hw)
 	 */
 	tqavctrl |= (10 << 5) << E1000_TQAVCTRL_FETCH_TM_SHIFT;
 
-	wr32(E1000_I210_TQAVCTRL, tqavctrl);
+	wr32(E1000_TQAVCTRL, tqavctrl);
 
 	return 0;
 }
+
+static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate)
+{
+	u_int32_t tqavctrl;
+	u_int32_t tqavcc;
+	u_int32_t tqavhc;
+	u_int32_t class_a_idle;
+	u_int32_t linkrate;
+	u_int32_t tpktsz_a;
+	int temp;
+	struct igb_adapter *adapter;
+	struct e1000_hw *hw;
+	float class_a_percent;
+	int error = 0;
+
+	if (ndev == NULL)
+		return -EINVAL;
+
+	adapter = netdev_priv(ndev);
+	if (adapter == NULL)
+		return -ENXIO;
+
+	hw = &adapter->hw;
+
+	if (adapter->link_speed < 100)
+		return -EINVAL;
+
+	if (adapter->link_duplex != FULL_DUPLEX)
+		return -EINVAL;
+
+	//kjt do we need a mutex to access the registers?
+
+	tqavctrl = rd32(E1000_TQAVCTRL);
+
+	if (rate == 0) {
+		/* disable the Qav shaper */
+		tqavctrl &= ~E1000_TQAVCTRL_DATA_TRAN_ARB;
+		wr32(E1000_TQAVCTRL, tqavctrl);
+		goto unlock;
+	}
+
+	tqavcc = E1000_TQAVCC_QUEUEMODE;
+
+	linkrate = E1000_TQAVCC_LINKRATE;
+
+	/* it is needed for Class B high credit calculations
+	 * so we need to guess it
+	 * TODO: check if it is right
+	 */
+	temp = rate / 8000 - (12 + 8 + 18 + 4);
+	if (temp > 0)
+		tpktsz_a = temp;
+	else
+		tpktsz_a = 0;
+	/* TODO: in igb_set_class_bandwidth if given tpktsz_a < 64
+	 * (for example 0) then the 64 value will be used even if
+	 * there is no class_A streams (class_a is 0)
+	 * I suspect that this is error, so we use 0 here.
+	 */
+
+	//do we need float?!?!?!?!!?
+	//no float support here!!!!
+	//TODO NEXT....
+	class_a_percent = rate;
+
+	if (adapter->link_speed == 100) {
+		/* bytes-per-sec @ 100Mbps */
+		class_a_percent /= (100000000.0 / 8);
+		class_a_idle = (u_int32_t)(class_a_percent * 0.2 *
+				(float)linkrate + 0.5);
+	} else {
+		/* bytes-per-sec @ 1Gbps */
+		class_a_percent /= (1000000000.0 / 8);
+		class_a_idle = (u_int32_t)(class_a_percent * 2.0 *
+				(float)linkrate + 0.5);
+	}
+
+	if (class_a_percent > 0.75) {
+		error = -EINVAL;
+		goto unlock;
+	}
+	tqavcc |= class_a_idle;
+
+	/*
+	 * hiCredit is the number of idleslope credits accumulated due to delay
+	 *
+	 * we assume the maxInterferenceSize is 18 + 4 + 1500 (1522).
+	 * Note: if EEE is enabled, we should use for maxInterferenceSize
+	 * the overhead of link recovery (a media-specific quantity).
+	 */
+	tqavhc = 0x80000000 + (class_a_idle * 1522 / linkrate); /* L.10 */
+
+	/* implicitly enable the Qav shaper */
+	tqavctrl |= E1000_TQAVCTRL_DATA_TRAN_ARB;
+	wr32(E1000_TQAVHC(0), tqavhc);
+	wr32(E1000_TQAVCC(0), tqavcc);
+	wr32(E1000_TQAVCTRL, tqavctrl);
+
+	unlock:
+	//release mutex if required...
+
+	return 0;
+}
+
 /* igb_main.c */

@@ -1019,13 +1019,24 @@
 #define E1000_RTTBCNRC_RF_INT_MASK	\
 	(E1000_RTTBCNRC_RF_DEC_MASK << E1000_RTTBCNRC_RF_INT_SHIFT)
 
+#define E1000_TQAVLC_MASK              0x3FFFFFF  /* bits [25:0] only */
+#define E1000_TQAVCC_IDLESLOPE_MASK    0x7FFF     /* Idle slope for given queue */
+#define E1000_TQAVCC_LINKRATE          30517      /* 50% allocation to Class A */
+//#define E1000_TQAVCC_KEEP_CREDITS      0x40000000 /* keep credits for deferred packets */
+#define E1000_TQAVCC_QUEUEMODE         0x80000000 /* queue mode, 0=strict, 1=SR mode */
+
+#define E1000_DTXFETCH_CURRPKT_FETCH   0x000FFFFF /* fetch time of current packet */
+#define E1000_DTXFETCH_CURRPKT_ADDR    0xFFF00000 /* LSB of the packet fetch address */
+
 #define E1000_TQAVCC_QUEUEMODE         0x80000000 /* queue mode, 0=strict, 1=SR mode */
 #define E1000_TQAVCTRL_TXMODE          0x00000001 /* Transmit mode, 0=legacy, 1=QAV */
 #define E1000_TQAVCTRL_1588_STAT_EN    0x00000004 /* report DMA time of tx packets */
 #define E1000_TQAVCTRL_DATA_FETCH_ARB  0x00000010 /* data fetch arbitration */
+#define E1000_TQAVCTRL_FETCH_TM_VALID  0x00000020 /* data fetch time valid */
 #define E1000_TQAVCTRL_DATA_TRAN_ARB   0x00000100 /* data tx arbitration */
 #define E1000_TQAVCTRL_DATA_TRAN_TIM   0x00000200 /* data launch time valid */
 #define E1000_TQAVCTRL_SP_WAIT_SR      0x00000400 /* stall SP to guarantee SR */
+#define E1000_TQAVCTRL_FETCH_TM_MASK   0xFFFF0000 /* fetch time delta offset from launch */
 #define E1000_TQAVCTRL_FETCH_TM_SHIFT  (16)       /* ... and associated shift value */
 
 /* Tx packet buffer fields */
@@ -1034,5 +1045,14 @@
 #define E1000_TXPBSIZE_TX1PB_SHIFT    6
 #define E1000_TXPBSIZE_TX2PB_SHIFT    12
 #define E1000_TXPBSIZE_TX3PB_SHIFT    18
+
+
+/*
+ *  * example usage:
+ *   * E1000_TQAVARBCTRL_TXPRIO(0,3) sets queue0 to priority=3 (highest)
+ *    */
+#define E1000_TQAVARBCTRL_TXQPRIO(_q, _n)  (((_n) & 0x3) << (_q << 2))  /* queue priority */
+
+#define E1000_QAV_LAUNCHTIME_EPOCH    0x3B9AC9FF /* nsec rollover 999,999,999 in decimal */
 
 #endif
