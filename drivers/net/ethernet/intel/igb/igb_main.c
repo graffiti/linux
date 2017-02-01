@@ -2439,7 +2439,7 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		wr32(E1000_RXPBS, I210_RXPBSIZE_DEFAULT);
 
 		//kjt use legacy or qav mode
-		if(0)
+		if(1)
 		{
 			wr32(E1000_TXPBS, I210_TXPBSIZE_DEFAULT);
 		}
@@ -4264,6 +4264,8 @@ static void igb_watchdog_task(struct work_struct *work)
 			hw->mac.ops.get_speed_and_duplex(hw,
 							 &adapter->link_speed,
 							 &adapter->link_duplex);
+
+			igb_init_qav_mode(hw);
 
 			ctrl = rd32(E1000_CTRL);
 			/* Links status message must follow this format */
@@ -8182,6 +8184,9 @@ int igb_reinit_queues(struct igb_adapter *adapter)
 	return err;
 }
 
+//includes VLAN tag
+#define IGB_QAV_MAX_PACKET_SIZE 1536
+
 static int igb_init_qav_mode(struct e1000_hw *hw)
 {
 	u32	tqavctrl;
@@ -8189,17 +8194,17 @@ static int igb_init_qav_mode(struct e1000_hw *hw)
 	u32	tqavhc0, tqavhc1;
 	u32	txpbsize;
 
-
 	//total tx buffer size is 24KB. We allocate 20KB to queue 0, and 4K to queue 3
-	txpbsize = (20) << E1000_TXPBSIZE_TX0PB_SHIFT;
-	txpbsize |= (0) << E1000_TXPBSIZE_TX1PB_SHIFT;
-	txpbsize |= (0) << E1000_TXPBSIZE_TX2PB_SHIFT;
+	txpbsize = (8) << E1000_TXPBSIZE_TX0PB_SHIFT;
+	txpbsize |= (4) << E1000_TXPBSIZE_TX1PB_SHIFT;
+	txpbsize |= (4) << E1000_TXPBSIZE_TX2PB_SHIFT;
 	txpbsize |= (4) << E1000_TXPBSIZE_TX3PB_SHIFT;
+	txpbsize |= (4) << E1000_TXPBSIZE_OS2BMCPBSIZE_SHIFT;
 
 	wr32(E1000_TXPBS, txpbsize); //I210_TXPBSIZE_DEFAULT);
 
 	/* std sized frames in 64 byte units with VLAN tags applied */
-	wr32(E1000_DTXMXPKTSZ, 1536 / 64);
+	wr32(E1000_DTXMXPKTSZ, IGB_QAV_MAX_PACKET_SIZE / 64);
 
 	/*
 	 * this function defaults the QAV shaper to OFF (TX_ARB=0)
@@ -8218,10 +8223,10 @@ static int igb_init_qav_mode(struct e1000_hw *hw)
 	wr32(E1000_TQAVHC(1), tqavhc1);
 
 	tqavctrl = E1000_TQAVCTRL_TXMODE |
-		   E1000_TQAVCTRL_DATA_FETCH_ARB |
-		   E1000_TQAVCTRL_DATA_TRAN_ARB |
-		   E1000_TQAVCTRL_DATA_TRAN_TIM |
-		   E1000_TQAVCTRL_SP_WAIT_SR;
+		   E1000_TQAVCTRL_DATA_FETCH_ARB;// |
+		   /*E1000_TQAVCTRL_DATA_TRAN_ARB; |*/
+		   /*E1000_TQAVCTRL_DATA_TRAN_TIM |*/
+		   /*E1000_TQAVCTRL_SP_WAIT_SR;*/
 
 	/* default to a 10 usec prefetch delta from launch time - time for
 	 * a 1500 byte rx frame to be received over the PCIe Gen1 x1 link.
@@ -8229,6 +8234,8 @@ static int igb_init_qav_mode(struct e1000_hw *hw)
 	tqavctrl |= (10 << 5) << E1000_TQAVCTRL_FETCH_TM_SHIFT;
 
 	wr32(E1000_TQAVCTRL, tqavctrl);
+
+	printk(KERN_ALERT "igb_init_qav_mode TQAVHC0 = %x, TQAVCC0 = %x, TQAVCTRL = %x\n", rd32(E1000_TQAVHC(0)), rd32(E1000_TQAVCC(0)), rd32(E1000_TQAVCTRL));
 
 	return 0;
 }
@@ -8238,14 +8245,9 @@ static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate)
 	u_int32_t tqavctrl;
 	u_int32_t tqavcc;
 	u_int32_t tqavhc;
-	u_int32_t class_a_idle;
-	u_int32_t linkrate;
-	u_int32_t tpktsz_a;
-	int temp;
 	struct igb_adapter *adapter;
 	struct e1000_hw *hw;
-	float class_a_percent;
-	int error = 0;
+	s16 idleSlope;
 
 	if (ndev == NULL)
 		return -EINVAL;
@@ -8256,83 +8258,59 @@ static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate)
 
 	hw = &adapter->hw;
 
+	if(queue > 1)
+		return -EINVAL;	//Qav only on queues 0 and 1
+
 	if (adapter->link_speed < 100)
 		return -EINVAL;
 
 	if (adapter->link_duplex != FULL_DUPLEX)
 		return -EINVAL;
 
-	//kjt do we need a mutex to access the registers?
-
 	tqavctrl = rd32(E1000_TQAVCTRL);
+
+	printk(KERN_ALERT "igb_set_tx_maxrate at start TQAVHC = %x, TQAVCC = %x, TQAVCTRL = %x\n", rd32(E1000_TQAVHC(queue)), rd32(E1000_TQAVCC(queue)), rd32(E1000_TQAVCTRL));
 
 	if (rate == 0) {
 		/* disable the Qav shaper */
 		tqavctrl &= ~E1000_TQAVCTRL_DATA_TRAN_ARB;
 		wr32(E1000_TQAVCTRL, tqavctrl);
-		goto unlock;
+		return 0;
 	}
 
-	tqavcc = E1000_TQAVCC_QUEUEMODE;
+	if (adapter->link_speed == 100)
+	{
+		if(rate > 9375000)
+			return -EINVAL; //must not allocate >75% of link
 
-	linkrate = E1000_TQAVCC_LINKRATE;
-
-	/* it is needed for Class B high credit calculations
-	 * so we need to guess it
-	 * TODO: check if it is right
-	 */
-	temp = rate / 8000 - (12 + 8 + 18 + 4);
-	if (temp > 0)
-		tpktsz_a = temp;
+		idleSlope = (((u64)rate) * E1000_TQAVCC_LINKRATE) / ((100000000 / 8)*5);
+	}
 	else
-		tpktsz_a = 0;
-	/* TODO: in igb_set_class_bandwidth if given tpktsz_a < 64
-	 * (for example 0) then the 64 value will be used even if
-	 * there is no class_A streams (class_a is 0)
-	 * I suspect that this is error, so we use 0 here.
-	 */
+	{
+		if(rate > 93750000)
+			return -EINVAL;  //must not allocate >75% of link
 
-	//do we need float?!?!?!?!!?
-	//no float support here!!!!
-	//TODO NEXT....
-	class_a_percent = rate;
-
-	if (adapter->link_speed == 100) {
-		/* bytes-per-sec @ 100Mbps */
-		class_a_percent /= (100000000.0 / 8);
-		class_a_idle = (u_int32_t)(class_a_percent * 0.2 *
-				(float)linkrate + 0.5);
-	} else {
-		/* bytes-per-sec @ 1Gbps */
-		class_a_percent /= (1000000000.0 / 8);
-		class_a_idle = (u_int32_t)(class_a_percent * 2.0 *
-				(float)linkrate + 0.5);
+		idleSlope = (((u64)rate) * E1000_TQAVCC_LINKRATE * 2) / (1000000000 / 8);
 	}
 
-	if (class_a_percent > 0.75) {
-		error = -EINVAL;
-		goto unlock;
-	}
-	tqavcc |= class_a_idle;
+	tqavcc = E1000_TQAVCC_QUEUEMODE | idleSlope;
 
 	/*
 	 * hiCredit is the number of idleslope credits accumulated due to delay
 	 *
 	 * we assume the maxInterferenceSize is 18 + 4 + 1500 (1522).
-	 * Note: if EEE is enabled, we should use for maxInterferenceSize
-	 * the overhead of link recovery (a media-specific quantity).
 	 */
-	tqavhc = 0x80000000 + (class_a_idle * 1522 / linkrate); /* L.10 */
+	tqavhc = 0x80000000 + ((s32)idleSlope * IGB_QAV_MAX_PACKET_SIZE / E1000_TQAVCC_LINKRATE); /* L.10 */
 
 	/* implicitly enable the Qav shaper */
 	tqavctrl |= E1000_TQAVCTRL_DATA_TRAN_ARB;
-	wr32(E1000_TQAVHC(0), tqavhc);
-	wr32(E1000_TQAVCC(0), tqavcc);
+	wr32(E1000_TQAVHC(queue), tqavhc);
+	wr32(E1000_TQAVCC(queue), tqavcc);
 	wr32(E1000_TQAVCTRL, tqavctrl);
 
-	unlock:
-	//release mutex if required...
+	printk(KERN_ALERT "igb: set Qav rate = %d, idleSlope = %d, HiCredit = %u for queue %d\n", rate, idleSlope, tqavhc, queue);
 
+	printk(KERN_ALERT "TQAVHC = %x, TQAVCC = %x, TQAVCTRL = %x\n", rd32(E1000_TQAVHC(queue)), rd32(E1000_TQAVCC(queue)), rd32(E1000_TQAVCTRL));
 	return 0;
 }
 
