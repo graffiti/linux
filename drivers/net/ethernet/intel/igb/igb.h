@@ -350,6 +350,8 @@ struct hwmon_buff {
 #define IGB_SDP_TIMER	4	//the pin which is for the timer
 #define IGB_RETA_SIZE	128
 
+#define IGB_NB_QAV_TX_QUEUES	2
+
 /* board specific private data structure */
 struct igb_adapter {
 	unsigned long active_vlans[BITS_TO_LONGS(VLAN_N_VID)];
@@ -467,6 +469,8 @@ struct igb_adapter {
 	u16 eee_advert;
 
 	bool timer_enabled;
+
+	u32 qav_rate[IGB_NB_QAV_TX_QUEUES];
 };
 
 #define IGB_FLAG_HAS_MSI		(1 << 0)

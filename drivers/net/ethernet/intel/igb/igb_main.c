@@ -120,7 +120,7 @@ static void igb_free_all_tx_resources(struct igb_adapter *);
 static void igb_free_all_rx_resources(struct igb_adapter *);
 static void igb_setup_mrqc(struct igb_adapter *);
 static int igb_probe(struct pci_dev *, const struct pci_device_id *);
-static int igb_init_qav_mode(struct e1000_hw *hw);
+static int igb_init_qav_mode(struct igb_adapter *);
 static void igb_remove(struct pci_dev *pdev);
 static int igb_sw_init(struct igb_adapter *);
 static int igb_open(struct net_device *);
@@ -2437,14 +2437,7 @@ static int igb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* configure RXPBSIZE and TXPBSIZE */
 	if (hw->mac.type == e1000_i210) {
 		wr32(E1000_RXPBS, I210_RXPBSIZE_DEFAULT);
-
-		//kjt use legacy or qav mode
-		if(1)
-		{
-			wr32(E1000_TXPBS, I210_TXPBSIZE_DEFAULT);
-		}
-		else
-			igb_init_qav_mode(hw);
+		wr32(E1000_TXPBS, I210_TXPBSIZE_DEFAULT);
 	}
 
 	setup_timer(&adapter->watchdog_timer, igb_watchdog,
@@ -4265,7 +4258,7 @@ static void igb_watchdog_task(struct work_struct *work)
 							 &adapter->link_speed,
 							 &adapter->link_duplex);
 
-			igb_init_qav_mode(hw);
+			igb_init_qav_mode(adapter);
 
 			ctrl = rd32(E1000_CTRL);
 			/* Links status message must follow this format */
@@ -8187,12 +8180,13 @@ int igb_reinit_queues(struct igb_adapter *adapter)
 //includes VLAN tag
 #define IGB_QAV_MAX_PACKET_SIZE 1536
 
-static int igb_init_qav_mode(struct e1000_hw *hw)
+static int igb_init_qav_mode(struct igb_adapter *adapter)
 {
+	struct e1000_hw *hw = &adapter->hw;
+	struct net_device *netdev = adapter->netdev;
 	u32	tqavctrl;
-	u32	tqavcc0, tqavcc1;
-	u32	tqavhc0, tqavhc1;
 	u32	txpbsize;
+	int q;
 
 	//total tx buffer size is 24KB. We allocate 20KB to queue 0, and 4K to queue 3
 	txpbsize = (8) << E1000_TXPBSIZE_TX0PB_SHIFT;
@@ -8206,27 +8200,14 @@ static int igb_init_qav_mode(struct e1000_hw *hw)
 	/* std sized frames in 64 byte units with VLAN tags applied */
 	wr32(E1000_DTXMXPKTSZ, IGB_QAV_MAX_PACKET_SIZE / 64);
 
-	/*
-	 * this function defaults the QAV shaper to OFF (TX_ARB=0)
-	 * user-mode library can reconfigure thresholds and enable
-	 * after the device has started.
-	 */
-
-	tqavcc0 = E1000_TQAVCC_QUEUEMODE; /* no idle slope */
-	tqavcc1 = E1000_TQAVCC_QUEUEMODE; /* no idle slope */
-	tqavhc0 = 0xFFFFFFFF; /* unlimited credits */
-	tqavhc1 = 0xFFFFFFFF; /* unlimited credits */
-
-	wr32(E1000_TQAVCC(0), tqavcc0);
-	wr32(E1000_TQAVCC(1), tqavcc1);
-	wr32(E1000_TQAVHC(0), tqavhc0);
-	wr32(E1000_TQAVHC(1), tqavhc1);
+	for(q=0; q<IGB_NB_QAV_TX_QUEUES; q++)
+	{
+		igb_set_tx_maxrate(netdev, q, adapter->qav_rate[q]);
+	}
 
 	tqavctrl = E1000_TQAVCTRL_TXMODE |
-		   E1000_TQAVCTRL_DATA_FETCH_ARB;// |
-		   /*E1000_TQAVCTRL_DATA_TRAN_ARB; |*/
-		   /*E1000_TQAVCTRL_DATA_TRAN_TIM |*/
-		   /*E1000_TQAVCTRL_SP_WAIT_SR;*/
+		   E1000_TQAVCTRL_DATA_FETCH_ARB |
+		   E1000_TQAVCTRL_DATA_TRAN_ARB;
 
 	/* default to a 10 usec prefetch delta from launch time - time for
 	 * a 1500 byte rx frame to be received over the PCIe Gen1 x1 link.
@@ -8242,7 +8223,6 @@ static int igb_init_qav_mode(struct e1000_hw *hw)
 
 static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate)
 {
-	u_int32_t tqavctrl;
 	u_int32_t tqavcc;
 	u_int32_t tqavhc;
 	struct igb_adapter *adapter;
@@ -8258,8 +8238,8 @@ static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate)
 
 	hw = &adapter->hw;
 
-	if(queue > 1)
-		return -EINVAL;	//Qav only on queues 0 and 1
+	if(queue >= IGB_NB_QAV_TX_QUEUES)
+		return -EINVAL;
 
 	if (adapter->link_speed < 100)
 		return -EINVAL;
@@ -8267,50 +8247,38 @@ static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate)
 	if (adapter->link_duplex != FULL_DUPLEX)
 		return -EINVAL;
 
-	tqavctrl = rd32(E1000_TQAVCTRL);
+	adapter->qav_rate[queue] = rate;
 
-	printk(KERN_ALERT "igb_set_tx_maxrate at start TQAVHC = %x, TQAVCC = %x, TQAVCTRL = %x\n", rd32(E1000_TQAVHC(queue)), rd32(E1000_TQAVCC(queue)), rd32(E1000_TQAVCTRL));
-
-	if (rate == 0) {
-		/* disable the Qav shaper */
-		tqavctrl &= ~E1000_TQAVCTRL_DATA_TRAN_ARB;
-		wr32(E1000_TQAVCTRL, tqavctrl);
-		return 0;
-	}
-
-	if (adapter->link_speed == 100)
+	if(rate==0)
 	{
-		if(rate > 9375000)
-			return -EINVAL; //must not allocate >75% of link
-
-		idleSlope = (((u64)rate) * E1000_TQAVCC_LINKRATE) / ((100000000 / 8)*5);
+		tqavcc = E1000_TQAVCC_QUEUEMODE | (E1000_TQAVCC_LINKRATE -1); /* max idle slope */
+		tqavhc = 0xFFFFFFFF; /* unlimited credits */
 	}
 	else
 	{
-		if(rate > 93750000)
-			return -EINVAL;  //must not allocate >75% of link
+		if (adapter->link_speed == 100)
+		{
+			if(rate > 9375000)
+				return -EINVAL; //must not allocate >75% of link
 
-		idleSlope = (((u64)rate) * E1000_TQAVCC_LINKRATE * 2) / (1000000000 / 8);
+			idleSlope = ((((u64)rate) * E1000_TQAVCC_LINKRATE) / ((100000000 / 8)*5)) +1;	//+1 for rounding error
+		}
+		else
+		{
+			if(rate > 93750000)
+				return -EINVAL;  //must not allocate >75% of link
+
+			idleSlope = ((((u64)rate) * E1000_TQAVCC_LINKRATE * 2) / (1000000000 / 8)) +1; //+1 for rounding error
+		}
+		tqavcc = E1000_TQAVCC_QUEUEMODE | idleSlope;
+		tqavhc = 0x80000000 + ((s32)idleSlope * IGB_QAV_MAX_PACKET_SIZE / E1000_TQAVCC_LINKRATE);
+
+		printk(KERN_ALERT "igb: set Qav rate = %d, idleSlope = %d, HiCredit = %u for queue %d\n", rate, idleSlope, tqavhc, queue);
 	}
 
-	tqavcc = E1000_TQAVCC_QUEUEMODE | idleSlope;
-
-	/*
-	 * hiCredit is the number of idleslope credits accumulated due to delay
-	 *
-	 * we assume the maxInterferenceSize is 18 + 4 + 1500 (1522).
-	 */
-	tqavhc = 0x80000000 + ((s32)idleSlope * IGB_QAV_MAX_PACKET_SIZE / E1000_TQAVCC_LINKRATE); /* L.10 */
-
-	/* implicitly enable the Qav shaper */
-	tqavctrl |= E1000_TQAVCTRL_DATA_TRAN_ARB;
 	wr32(E1000_TQAVHC(queue), tqavhc);
 	wr32(E1000_TQAVCC(queue), tqavcc);
-	wr32(E1000_TQAVCTRL, tqavctrl);
 
-	printk(KERN_ALERT "igb: set Qav rate = %d, idleSlope = %d, HiCredit = %u for queue %d\n", rate, idleSlope, tqavhc, queue);
-
-	printk(KERN_ALERT "TQAVHC = %x, TQAVCC = %x, TQAVCTRL = %x\n", rd32(E1000_TQAVHC(queue)), rd32(E1000_TQAVCC(queue)), rd32(E1000_TQAVCTRL));
 	return 0;
 }
 
