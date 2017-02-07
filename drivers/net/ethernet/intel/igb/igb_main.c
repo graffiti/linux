@@ -8216,7 +8216,7 @@ static int igb_init_qav_mode(struct igb_adapter *adapter)
 
 	wr32(E1000_TQAVCTRL, tqavctrl);
 
-	printk(KERN_ALERT "igb_init_qav_mode TQAVHC0 = %x, TQAVCC0 = %x, TQAVCTRL = %x\n", rd32(E1000_TQAVHC(0)), rd32(E1000_TQAVCC(0)), rd32(E1000_TQAVCTRL));
+	printk(KERN_INFO "igb: entered Qav mode\n");
 
 	return 0;
 }
@@ -8273,7 +8273,7 @@ static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate)
 		tqavcc = E1000_TQAVCC_QUEUEMODE | idleSlope;
 		tqavhc = 0x80000000 + ((s32)idleSlope * IGB_QAV_MAX_PACKET_SIZE / E1000_TQAVCC_LINKRATE);
 
-		printk(KERN_ALERT "igb: set Qav rate = %d, idleSlope = %d, HiCredit = %u for queue %d\n", rate, idleSlope, tqavhc, queue);
+		printk(KERN_INFO "igb: set Qav rate = %d, idleSlope = %d, HiCredit = %u for queue %d\n", rate, idleSlope, tqavhc, queue);
 	}
 
 	wr32(E1000_TQAVHC(queue), tqavhc);
