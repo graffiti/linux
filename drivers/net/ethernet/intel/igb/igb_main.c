@@ -120,6 +120,7 @@ static void igb_free_all_tx_resources(struct igb_adapter *);
 static void igb_free_all_rx_resources(struct igb_adapter *);
 static void igb_setup_mrqc(struct igb_adapter *);
 static int igb_probe(struct pci_dev *, const struct pci_device_id *);
+static int igb_init_qav_mode(struct igb_adapter *);
 static void igb_remove(struct pci_dev *pdev);
 static int igb_sw_init(struct igb_adapter *);
 static int igb_open(struct net_device *);
@@ -175,6 +176,8 @@ static int igb_ndo_set_vf_spoofchk(struct net_device *netdev, int vf,
 static int igb_ndo_get_vf_config(struct net_device *netdev, int vf,
 				 struct ifla_vf_info *ivi);
 static void igb_check_vf_rate_limit(struct igb_adapter *);
+
+static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate);
 
 #ifdef CONFIG_PCI_IOV
 static int igb_vf_configure(struct igb_adapter *adapter, int vf);
@@ -2089,6 +2092,7 @@ static const struct net_device_ops igb_netdev_ops = {
 	.ndo_fix_features	= igb_fix_features,
 	.ndo_set_features	= igb_set_features,
 	.ndo_features_check	= passthru_features_check,
+	.ndo_set_tx_maxrate = igb_set_tx_maxrate,
 };
 
 /**
@@ -4253,6 +4257,8 @@ static void igb_watchdog_task(struct work_struct *work)
 			hw->mac.ops.get_speed_and_duplex(hw,
 							 &adapter->link_speed,
 							 &adapter->link_duplex);
+
+			igb_init_qav_mode(adapter);
 
 			ctrl = rd32(E1000_CTRL);
 			/* Links status message must follow this format */
@@ -8170,4 +8176,110 @@ int igb_reinit_queues(struct igb_adapter *adapter)
 
 	return err;
 }
+
+//includes VLAN tag
+#define IGB_QAV_MAX_PACKET_SIZE 1536
+
+static int igb_init_qav_mode(struct igb_adapter *adapter)
+{
+	struct e1000_hw *hw = &adapter->hw;
+	struct net_device *netdev = adapter->netdev;
+	u32	tqavctrl;
+	u32	txpbsize;
+	int q;
+
+	//total tx buffer size is 24KB. We allocate 20KB to queue 0, and 4K to queue 3
+	txpbsize = (8) << E1000_TXPBSIZE_TX0PB_SHIFT;
+	txpbsize |= (4) << E1000_TXPBSIZE_TX1PB_SHIFT;
+	txpbsize |= (4) << E1000_TXPBSIZE_TX2PB_SHIFT;
+	txpbsize |= (4) << E1000_TXPBSIZE_TX3PB_SHIFT;
+	txpbsize |= (4) << E1000_TXPBSIZE_OS2BMCPBSIZE_SHIFT;
+
+	wr32(E1000_TXPBS, txpbsize); //I210_TXPBSIZE_DEFAULT);
+
+	/* std sized frames in 64 byte units with VLAN tags applied */
+	wr32(E1000_DTXMXPKTSZ, IGB_QAV_MAX_PACKET_SIZE / 64);
+
+	for(q=0; q<IGB_NB_QAV_TX_QUEUES; q++)
+	{
+		igb_set_tx_maxrate(netdev, q, adapter->qav_rate[q]);
+	}
+
+	tqavctrl = E1000_TQAVCTRL_TXMODE |
+		   E1000_TQAVCTRL_DATA_FETCH_ARB |
+		   E1000_TQAVCTRL_DATA_TRAN_ARB;
+
+	/* default to a 10 usec prefetch delta from launch time - time for
+	 * a 1500 byte rx frame to be received over the PCIe Gen1 x1 link.
+	 */
+	tqavctrl |= (10 << 5) << E1000_TQAVCTRL_FETCH_TM_SHIFT;
+
+	wr32(E1000_TQAVCTRL, tqavctrl);
+
+	printk(KERN_INFO "igb: entered Qav mode\n");
+
+	return 0;
+}
+
+static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate)
+{
+	u_int32_t tqavcc;
+	u_int32_t tqavhc;
+	struct igb_adapter *adapter;
+	struct e1000_hw *hw;
+	s16 idleSlope;
+
+	if (ndev == NULL)
+		return -EINVAL;
+
+	adapter = netdev_priv(ndev);
+	if (adapter == NULL)
+		return -ENXIO;
+
+	hw = &adapter->hw;
+
+	if(queue >= IGB_NB_QAV_TX_QUEUES)
+		return -EINVAL;
+
+	if (adapter->link_speed < 100)
+		return -EINVAL;
+
+	if (adapter->link_duplex != FULL_DUPLEX)
+		return -EINVAL;
+
+	adapter->qav_rate[queue] = rate;
+
+	if(rate==0)
+	{
+		tqavcc = E1000_TQAVCC_QUEUEMODE | (E1000_TQAVCC_LINKRATE -1); /* max idle slope */
+		tqavhc = 0xFFFFFFFF; /* unlimited credits */
+	}
+	else
+	{
+		if (adapter->link_speed == 100)
+		{
+			if(rate > 9375000)
+				return -EINVAL; //must not allocate >75% of link
+
+			idleSlope = ((((u64)rate) * E1000_TQAVCC_LINKRATE) / ((100000000 / 8)*5)) +1;	//+1 for rounding error
+		}
+		else
+		{
+			if(rate > 93750000)
+				return -EINVAL;  //must not allocate >75% of link
+
+			idleSlope = ((((u64)rate) * E1000_TQAVCC_LINKRATE * 2) / (1000000000 / 8)) +1; //+1 for rounding error
+		}
+		tqavcc = E1000_TQAVCC_QUEUEMODE | idleSlope;
+		tqavhc = 0x80000000 + ((s32)idleSlope * IGB_QAV_MAX_PACKET_SIZE / E1000_TQAVCC_LINKRATE);
+
+		printk(KERN_INFO "igb: set Qav rate = %d, idleSlope = %d, HiCredit = %u for queue %d\n", rate, idleSlope, tqavhc, queue);
+	}
+
+	wr32(E1000_TQAVHC(queue), tqavhc);
+	wr32(E1000_TQAVCC(queue), tqavcc);
+
+	return 0;
+}
+
 /* igb_main.c */

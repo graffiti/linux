@@ -86,6 +86,24 @@
 #define E1000_MPHY_DATA		0x0E10 /* GBE MPHY Data */
 #define E1000_MPHY_STAT		0x0E0C /* GBE MPHY Statistics */
 
+#define E1000_DTXMXPKTSZ	0x0355C
+#define E1000_TQAVCTRL	0x3570
+
+/* High credit registers where _n can be 0 or 1. */
+#define E1000_TQAVHC(_n)			(0x300C + 0x40 * (_n))
+
+/* Queues fetch arbitration priority control register */
+#define E1000_I210_TQAVARBCTRL			0x3574
+/* Queues priority masks where _n and _p can be 0-3. */
+#define E1000_TQAVARBCTRL_QUEUE_PRI(_n, _p)	((_p) << (2 * (_n)))
+/* QAV Tx mode control registers where _n can be 0 or 1. */
+#define E1000_TQAVCC(_n)			(0x3004 + 0x40 * (_n))
+
+/* QAV Tx mode control register bitfields masks */
+#define E1000_TQAVCC_IDLE_SLOPE		0xFFFF /* Idle slope */
+#define E1000_TQAVCC_KEEP_CREDITS	(1 << 30) /* Keep credits opt enable */
+#define E1000_TQAVCC_QUEUE_MODE		(1 << 31) /* SP vs. SR Tx mode */
+
 /* IEEE 1588 TIMESYNCH */
 #define E1000_TSYNCRXCTL 0x0B620 /* Rx Time Sync Control register - RW */
 #define E1000_TSYNCTXCTL 0x0B614 /* Tx Time Sync Control register - RW */
