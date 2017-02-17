@@ -1108,43 +1108,42 @@ static void igb_set_interrupt_capability(struct igb_adapter *adapter, bool msix)
 	int err;
 	int numvecs, i;
 
-	if (!msix)
-		goto msi_only;
-	adapter->flags |= IGB_FLAG_HAS_MSIX;
+	if (adapter->flags & IGB_FLAG_HAS_MSIX)
+	{
+		/* Number of supported queues. */
+		adapter->num_rx_queues = adapter->rss_queues;
+		if (adapter->vfs_allocated_count)
+			adapter->num_tx_queues = 1;
+		else
+			adapter->num_tx_queues = adapter->rss_queues;
 
-	/* Number of supported queues. */
-	adapter->num_rx_queues = adapter->rss_queues;
-	if (adapter->vfs_allocated_count)
-		adapter->num_tx_queues = 1;
-	else
-		adapter->num_tx_queues = adapter->rss_queues;
+		/* start with one vector for every Rx queue */
+		numvecs = adapter->num_rx_queues;
 
-	/* start with one vector for every Rx queue */
-	numvecs = adapter->num_rx_queues;
+		/* if Tx handler is separate add 1 for every Tx queue */
+		if (!(adapter->flags & IGB_FLAG_QUEUE_PAIRS))
+			numvecs += adapter->num_tx_queues;
 
-	/* if Tx handler is separate add 1 for every Tx queue */
-	if (!(adapter->flags & IGB_FLAG_QUEUE_PAIRS))
-		numvecs += adapter->num_tx_queues;
+		/* store the number of vectors reserved for queues */
+		adapter->num_q_vectors = numvecs;
 
-	/* store the number of vectors reserved for queues */
-	adapter->num_q_vectors = numvecs;
+		/* add 1 vector for link status interrupts */
+		numvecs++;
+		for (i = 0; i < numvecs; i++)
+			adapter->msix_entries[i].entry = i;
 
-	/* add 1 vector for link status interrupts */
-	numvecs++;
-	for (i = 0; i < numvecs; i++)
-		adapter->msix_entries[i].entry = i;
+		err = pci_enable_msix_range(adapter->pdev,
+				adapter->msix_entries,
+				numvecs,
+				numvecs);
 
-	err = pci_enable_msix_range(adapter->pdev,
-				    adapter->msix_entries,
-				    numvecs,
-				    numvecs);
-	if (err > 0)
-		return;
+		if (err > 0)
+			return;
 
-	igb_reset_interrupt_capability(adapter);
+		igb_reset_interrupt_capability(adapter);
+	}
 
 	/* If we can't do MSI-X, try MSI */
-msi_only:
 	adapter->flags &= ~IGB_FLAG_HAS_MSIX;
 #ifdef CONFIG_PCI_IOV
 	/* disable SR-IOV for non MSI-X configurations */
@@ -1162,14 +1161,29 @@ msi_only:
 		dev_info(&adapter->pdev->dev, "IOV Disabled\n");
 	}
 #endif
+
+	//kjt
+	/*
 	adapter->vfs_allocated_count = 0;
-	adapter->rss_queues = 1;
 	adapter->flags |= IGB_FLAG_QUEUE_PAIRS;
+	adapter->rss_queues = 1;
 	adapter->num_rx_queues = 1;
 	adapter->num_tx_queues = 1;
 	adapter->num_q_vectors = 1;
-	if (!pci_enable_msi(adapter->pdev))
-		adapter->flags |= IGB_FLAG_HAS_MSI;
+*/
+	adapter->vfs_allocated_count = 0;
+	adapter->flags |= IGB_FLAG_QUEUE_PAIRS;
+	adapter->rss_queues = 4;
+	adapter->num_rx_queues = 4;
+	adapter->num_tx_queues = 4;
+	adapter->num_q_vectors = 1;
+
+
+	if (adapter->flags & IGB_FLAG_HAS_MSI)
+	{
+		if (pci_enable_msi(adapter->pdev))
+			adapter->flags &= ~IGB_FLAG_HAS_MSI;
+	}
 }
 
 static void igb_add_ring(struct igb_ring *ring,
@@ -1201,8 +1215,9 @@ static int igb_alloc_q_vector(struct igb_adapter *adapter,
 	int ring_count, size;
 
 	/* igb only supports 1 Tx and/or 1 Rx queue per vector */
-	if (txr_count > 1 || rxr_count > 1)
-		return -ENOMEM;
+	//kjt not anymore it doesn't
+	//if (txr_count > 1 || rxr_count > 1)
+	//	return -ENOMEM;
 
 	ring_count = txr_count + rxr_count;
 	size = sizeof(struct igb_q_vector) +
@@ -1250,7 +1265,7 @@ static int igb_alloc_q_vector(struct igb_adapter *adapter,
 			q_vector->itr_val = adapter->tx_itr_setting;
 	}
 
-	if (txr_count) {
+	while (txr_count) {
 		/* assign generic ring traits */
 		ring->dev = &adapter->pdev->dev;
 		ring->netdev = adapter->netdev;
@@ -1275,11 +1290,15 @@ static int igb_alloc_q_vector(struct igb_adapter *adapter,
 		/* assign ring to adapter */
 		adapter->tx_ring[txr_idx] = ring;
 
+		/* update count and index */
+		txr_count--;
+		txr_idx += v_count;
+
 		/* push pointer to next ring */
 		ring++;
 	}
 
-	if (rxr_count) {
+	while (rxr_count) {
 		/* assign generic ring traits */
 		ring->dev = &adapter->pdev->dev;
 		ring->netdev = adapter->netdev;
@@ -1308,6 +1327,13 @@ static int igb_alloc_q_vector(struct igb_adapter *adapter,
 
 		/* assign ring to adapter */
 		adapter->rx_ring[rxr_idx] = ring;
+
+		/* update count and index */
+		rxr_count--;
+		rxr_idx += v_count;
+
+		/* push pointer to next ring */
+		ring++;
 	}
 
 	return 0;
@@ -1329,10 +1355,24 @@ static int igb_alloc_q_vectors(struct igb_adapter *adapter)
 	int rxr_idx = 0, txr_idx = 0, v_idx = 0;
 	int err;
 
+	if(!((adapter->flags & IGB_FLAG_HAS_MSIX) || (adapter->flags & IGB_FLAG_HAS_MSI)))
+	{
+		//special case for legacy multi queue
+		err = igb_alloc_q_vector(adapter, q_vectors, 0,
+				adapter->num_tx_queues, 0, adapter->num_rx_queues, 0);
+
+		printk(KERN_ALERT "igb_alloc_q_vector special legacy multiqueue\n");
+
+		return 0;
+
+	}
+
 	if (q_vectors >= (rxr_remaining + txr_remaining)) {
 		for (; rxr_remaining; v_idx++) {
 			err = igb_alloc_q_vector(adapter, q_vectors, v_idx,
 						 0, 0, 1, rxr_idx);
+
+			printk(KERN_ALERT "igb_alloc_q_vector rx\n");
 
 			if (err)
 				goto err_out;
@@ -1348,6 +1388,9 @@ static int igb_alloc_q_vectors(struct igb_adapter *adapter)
 		int tqpv = DIV_ROUND_UP(txr_remaining, q_vectors - v_idx);
 
 		err = igb_alloc_q_vector(adapter, q_vectors, v_idx,
+					 tqpv, txr_idx, rqpv, rxr_idx);
+
+		printk(KERN_ALERT "igb_alloc_q_vector tx q_vectors = %d, v_idx = %d, tqpv = %d, txr_idx = %d, rqpv = %d, rxr_idx = %d\n", q_vectors, v_idx,
 					 tqpv, txr_idx, rqpv, rxr_idx);
 
 		if (err)
@@ -1393,8 +1436,9 @@ static int igb_init_interrupt_scheme(struct igb_adapter *adapter, bool msix)
 		goto err_alloc_q_vectors;
 	}
 
+	printk(KERN_ALERT "a\n");
 	igb_cache_ring_register(adapter);
-
+	printk(KERN_ALERT "b\n");
 	return 0;
 
 err_alloc_q_vectors:
@@ -2991,7 +3035,14 @@ static int igb_sw_init(struct igb_adapter *adapter)
 #endif /* CONFIG_PCI_IOV */
 
 	/* Assume MSI-X interrupts, will be checked during IRQ allocation */
-	adapter->flags |= IGB_FLAG_HAS_MSIX;
+	//adapter->flags |= IGB_FLAG_HAS_MSIX;
+	//adapter->flags |= IGB_FLAG_HAS_MSI;
+
+	//kjt - legacy only please
+	//adapter->flags &= ~IGB_FLAG_HAS_MSI;
+	//adapter->flags &= ~IGB_FLAG_HAS_MSIX;
+
+
 
 	igb_probe_vfs(adapter);
 
@@ -3002,10 +3053,12 @@ static int igb_sw_init(struct igb_adapter *adapter)
 				       GFP_ATOMIC);
 
 	/* This call may decrease the number of queues */
-	if (igb_init_interrupt_scheme(adapter, true)) {
+	if (igb_init_interrupt_scheme(adapter, (adapter->flags & IGB_FLAG_HAS_MSIX))) {
 		dev_err(&pdev->dev, "Unable to allocate memory for queues\n");
 		return -ENOMEM;
 	}
+
+	printk(KERN_ALERT "c\n");
 
 	/* Explicitly disable IRQ since the NIC can be in any state. */
 	igb_irq_disable(adapter);
