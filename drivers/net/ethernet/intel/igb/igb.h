@@ -231,6 +231,7 @@ struct igb_ring_container {
 };
 
 struct igb_ring {
+	struct igb_ring *next;	/* pointer to next ring in q_vector */
 	struct igb_q_vector *q_vector;	/* backlink to q_vector */
 	struct net_device *netdev;	/* back pointer to net_device */
 	struct device *dev;		/* device pointer for dma mapping */

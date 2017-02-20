@@ -151,8 +151,8 @@ static void igb_update_dca(struct igb_q_vector *);
 static void igb_setup_dca(struct igb_adapter *);
 #endif /* CONFIG_IGB_DCA */
 static int igb_poll(struct napi_struct *, int);
-static bool igb_clean_tx_irq(struct igb_q_vector *);
-static int igb_clean_rx_irq(struct igb_q_vector *, int);
+static bool igb_clean_tx_irq(struct igb_q_vector *, struct igb_ring *);
+static int igb_clean_rx_irq(struct igb_q_vector *, struct igb_ring *, int);
 static int igb_ioctl(struct net_device *, struct ifreq *, int cmd);
 static void igb_tx_timeout(struct net_device *);
 static void igb_reset_task(struct work_struct *);
@@ -1189,6 +1189,7 @@ static void igb_set_interrupt_capability(struct igb_adapter *adapter, bool msix)
 static void igb_add_ring(struct igb_ring *ring,
 			 struct igb_ring_container *head)
 {
+	ring->next = head->ring;
 	head->ring = ring;
 	head->count++;
 }
@@ -1436,9 +1437,7 @@ static int igb_init_interrupt_scheme(struct igb_adapter *adapter, bool msix)
 		goto err_alloc_q_vectors;
 	}
 
-	printk(KERN_ALERT "a\n");
 	igb_cache_ring_register(adapter);
-	printk(KERN_ALERT "b\n");
 	return 0;
 
 err_alloc_q_vectors:
@@ -6478,6 +6477,9 @@ static void igb_ring_irq_enable(struct igb_q_vector *q_vector)
 	}
 }
 
+/* iterator for handling rings in ring container */
+#define igb_for_each_ring(pos, head) \
+	for (pos = (head).ring; pos != NULL; pos = pos->next)
 /**
  *  igb_poll - NAPI Rx polling callback
  *  @napi: napi polling structure
@@ -6490,20 +6492,76 @@ static int igb_poll(struct napi_struct *napi, int budget)
 						     napi);
 	bool clean_complete = true;
 	int work_done = 0;
+	int per_ring_budget = 0;
+	struct igb_ring *ring;
 
 #ifdef CONFIG_IGB_DCA
 	if (q_vector->adapter->flags & IGB_FLAG_DCA_ENABLED)
 		igb_update_dca(q_vector);
 #endif
-	if (q_vector->tx.ring)
-		clean_complete = igb_clean_tx_irq(q_vector);
 
-	if (q_vector->rx.ring) {
+
+	//kjt
+
+	//if (q_vector->tx.ring)
+	//	clean_complete = igb_clean_tx_irq(q_vector);
+
+
+	igb_for_each_ring(ring, q_vector->tx)
+		clean_complete &= !!igb_clean_tx_irq(q_vector, ring);
+
+
+	//never happens, always returns true
+	//if (!ixgbe_qv_lock_napi(q_vector))
+	//		return budget;
+
+
+
+
+
+
+//old way
+/*	if (q_vector->rx.ring) {
 		int cleaned = igb_clean_rx_irq(q_vector, budget);
 
 		work_done += cleaned;
 		clean_complete &= (cleaned < budget);
 	}
+	*/
+	/* attempt to distribute budget to each queue fairly, but don't allow
+		 * the budget to go below 1 because we'll exit polling */
+		if (q_vector->rx.count > 1)
+			per_ring_budget = max(budget/q_vector->rx.count, 1);
+		else
+			per_ring_budget = budget;
+
+		igb_for_each_ring(ring, q_vector->rx) {
+			int cleaned = igb_clean_rx_irq(q_vector, ring,
+							 per_ring_budget);
+
+			work_done += cleaned;
+			clean_complete &= (cleaned < per_ring_budget);
+		}
+
+		//ixgbe_qv_unlock_napi(q_vector);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 	/* If all work not completed, return budget and keep polling */
 	if (!clean_complete)
@@ -6522,10 +6580,10 @@ static int igb_poll(struct napi_struct *napi, int budget)
  *
  *  returns true if ring is completely cleaned
  **/
-static bool igb_clean_tx_irq(struct igb_q_vector *q_vector)
+static bool igb_clean_tx_irq(struct igb_q_vector *q_vector, struct igb_ring *tx_ring)
 {
 	struct igb_adapter *adapter = q_vector->adapter;
-	struct igb_ring *tx_ring = q_vector->tx.ring;
+	//struct igb_ring *tx_ring = q_vector->tx.ring;
 	struct igb_tx_buffer *tx_buffer;
 	union e1000_adv_tx_desc *tx_desc;
 	unsigned int total_bytes = 0, total_packets = 0;
@@ -7034,9 +7092,9 @@ static void igb_process_skb_fields(struct igb_ring *rx_ring,
 	skb->protocol = eth_type_trans(skb, rx_ring->netdev);
 }
 
-static int igb_clean_rx_irq(struct igb_q_vector *q_vector, const int budget)
+static int igb_clean_rx_irq(struct igb_q_vector *q_vector, struct igb_ring *rx_ring, const int budget)
 {
-	struct igb_ring *rx_ring = q_vector->rx.ring;
+	//struct igb_ring *rx_ring = q_vector->rx.ring;
 	struct sk_buff *skb = rx_ring->skb;
 	unsigned int total_bytes = 0, total_packets = 0;
 	u16 cleaned_count = igb_desc_unused(rx_ring);
