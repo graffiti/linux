@@ -114,6 +114,11 @@ static const struct pci_device_id igb_pci_tbl[] = {
 
 MODULE_DEVICE_TABLE(pci, igb_pci_tbl);
 
+static unsigned int int_mode = 2;
+module_param(int_mode, uint, 0);
+MODULE_PARM_DESC(int_mode,
+		 "select interrupt mode, 0 = legacy, 1 = MSI, 2 = MSI-X");
+
 static int igb_setup_all_tx_resources(struct igb_adapter *);
 static int igb_setup_all_rx_resources(struct igb_adapter *);
 static void igb_free_all_tx_resources(struct igb_adapter *);
@@ -1163,21 +1168,12 @@ static void igb_set_interrupt_capability(struct igb_adapter *adapter, bool msix)
 #endif
 
 	//kjt
-	/*
-	adapter->vfs_allocated_count = 0;
-	adapter->flags |= IGB_FLAG_QUEUE_PAIRS;
-	adapter->rss_queues = 1;
-	adapter->num_rx_queues = 1;
-	adapter->num_tx_queues = 1;
-	adapter->num_q_vectors = 1;
-*/
 	adapter->vfs_allocated_count = 0;
 	adapter->flags |= IGB_FLAG_QUEUE_PAIRS;
 	adapter->rss_queues = 4;
 	adapter->num_rx_queues = 4;
 	adapter->num_tx_queues = 4;
 	adapter->num_q_vectors = 1;
-
 
 	if (adapter->flags & IGB_FLAG_HAS_MSI)
 	{
@@ -1214,11 +1210,6 @@ static int igb_alloc_q_vector(struct igb_adapter *adapter,
 	struct igb_q_vector *q_vector;
 	struct igb_ring *ring;
 	int ring_count, size;
-
-	/* igb only supports 1 Tx and/or 1 Rx queue per vector */
-	//kjt not anymore it doesn't
-	//if (txr_count > 1 || rxr_count > 1)
-	//	return -ENOMEM;
 
 	ring_count = txr_count + rxr_count;
 	size = sizeof(struct igb_q_vector) +
@@ -1356,16 +1347,16 @@ static int igb_alloc_q_vectors(struct igb_adapter *adapter)
 	int rxr_idx = 0, txr_idx = 0, v_idx = 0;
 	int err;
 
-	if(!((adapter->flags & IGB_FLAG_HAS_MSIX) || (adapter->flags & IGB_FLAG_HAS_MSI)))
+	if(!(adapter->flags & IGB_FLAG_HAS_MSIX))
 	{
-		//special case for legacy multi queue
+		//special case for msi/legacy multi queue
 		err = igb_alloc_q_vector(adapter, q_vectors, 0,
 				adapter->num_tx_queues, 0, adapter->num_rx_queues, 0);
 
-		printk(KERN_ALERT "igb_alloc_q_vector special legacy multiqueue\n");
+		if (err)
+			goto err_out;
 
 		return 0;
-
 	}
 
 	if (q_vectors >= (rxr_remaining + txr_remaining)) {
@@ -3033,15 +3024,12 @@ static int igb_sw_init(struct igb_adapter *adapter)
 	}
 #endif /* CONFIG_PCI_IOV */
 
-	/* Assume MSI-X interrupts, will be checked during IRQ allocation */
-	//adapter->flags |= IGB_FLAG_HAS_MSIX;
-	//adapter->flags |= IGB_FLAG_HAS_MSI;
 
-	//kjt - legacy only please
-	//adapter->flags &= ~IGB_FLAG_HAS_MSI;
-	//adapter->flags &= ~IGB_FLAG_HAS_MSIX;
-
-
+	//kjt - set preferred interrupt mode. will fall back if not supported.
+	if(2 == int_mode)
+		adapter->flags |= IGB_FLAG_HAS_MSIX;
+	if(1 == int_mode)
+		adapter->flags |= IGB_FLAG_HAS_MSI;
 
 	igb_probe_vfs(adapter);
 
@@ -3056,8 +3044,6 @@ static int igb_sw_init(struct igb_adapter *adapter)
 		dev_err(&pdev->dev, "Unable to allocate memory for queues\n");
 		return -ENOMEM;
 	}
-
-	printk(KERN_ALERT "c\n");
 
 	/* Explicitly disable IRQ since the NIC can be in any state. */
 	igb_irq_disable(adapter);
@@ -6500,68 +6486,24 @@ static int igb_poll(struct napi_struct *napi, int budget)
 		igb_update_dca(q_vector);
 #endif
 
-
 	//kjt
-
-	//if (q_vector->tx.ring)
-	//	clean_complete = igb_clean_tx_irq(q_vector);
-
-
 	igb_for_each_ring(ring, q_vector->tx)
 		clean_complete &= !!igb_clean_tx_irq(q_vector, ring);
 
+	/* attempt to distribute budget to each queue fairly, but don't allow
+	 * the budget to go below 1 because we'll exit polling */
+	if (q_vector->rx.count > 1)
+		per_ring_budget = max(budget/q_vector->rx.count, 1);
+	else
+		per_ring_budget = budget;
 
-	//never happens, always returns true
-	//if (!ixgbe_qv_lock_napi(q_vector))
-	//		return budget;
-
-
-
-
-
-
-//old way
-/*	if (q_vector->rx.ring) {
-		int cleaned = igb_clean_rx_irq(q_vector, budget);
+	igb_for_each_ring(ring, q_vector->rx) {
+		int cleaned = igb_clean_rx_irq(q_vector, ring,
+				per_ring_budget);
 
 		work_done += cleaned;
-		clean_complete &= (cleaned < budget);
+		clean_complete &= (cleaned < per_ring_budget);
 	}
-	*/
-	/* attempt to distribute budget to each queue fairly, but don't allow
-		 * the budget to go below 1 because we'll exit polling */
-		if (q_vector->rx.count > 1)
-			per_ring_budget = max(budget/q_vector->rx.count, 1);
-		else
-			per_ring_budget = budget;
-
-		igb_for_each_ring(ring, q_vector->rx) {
-			int cleaned = igb_clean_rx_irq(q_vector, ring,
-							 per_ring_budget);
-
-			work_done += cleaned;
-			clean_complete &= (cleaned < per_ring_budget);
-		}
-
-		//ixgbe_qv_unlock_napi(q_vector);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 	/* If all work not completed, return budget and keep polling */
 	if (!clean_complete)
