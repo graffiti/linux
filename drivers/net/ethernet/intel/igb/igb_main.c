@@ -8280,7 +8280,7 @@ static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate)
 	u_int32_t tqavhc;
 	struct igb_adapter *adapter;
 	struct e1000_hw *hw;
-	s16 idleSlope;
+	u64 idleSlope;
 
 	if (ndev == NULL)
 		return -EINVAL;
@@ -8313,20 +8313,22 @@ static int igb_set_tx_maxrate(struct net_device *ndev, int queue, u32 rate)
 		{
 			if(rate > 9375000)
 				return -EINVAL; //must not allocate >75% of link
-
-			idleSlope = ((((u64)rate) * E1000_TQAVCC_LINKRATE) / ((100000000 / 8)*5)) +1;	//+1 for rounding error
 		}
 		else
 		{
 			if(rate > 93750000)
-				return -EINVAL;  //must not allocate >75% of link
-
-			idleSlope = ((((u64)rate) * E1000_TQAVCC_LINKRATE * 2) / (1000000000 / 8)) +1; //+1 for rounding error
+				return -EINVAL; //must not allocate >75% of link
 		}
-		tqavcc = E1000_TQAVCC_QUEUEMODE | idleSlope;
-		tqavhc = 0x80000000 + ((s32)idleSlope * IGB_QAV_MAX_PACKET_SIZE / E1000_TQAVCC_LINKRATE);
 
-		printk(KERN_INFO "igb: set Qav rate = %d, idleSlope = %d, HiCredit = %u for queue %d\n", rate, idleSlope, tqavhc, queue);
+		idleSlope = rate;
+		idleSlope *= E1000_TQAVCC_LINKRATE;
+		do_div(idleSlope, 62500000);
+		idleSlope += 1;		//+1 for rounding error
+
+		tqavcc = E1000_TQAVCC_QUEUEMODE | (u16)idleSlope;
+		tqavhc = 0x80000000 + ((u32)idleSlope * IGB_QAV_MAX_PACKET_SIZE / E1000_TQAVCC_LINKRATE);
+
+		printk(KERN_INFO "igb: set Qav rate = %d, idleSlope = %d, HiCredit = %u for queue %d\n", rate, (u32)idleSlope, tqavhc, queue);
 	}
 
 	wr32(E1000_TQAVHC(queue), tqavhc);
