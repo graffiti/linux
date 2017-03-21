@@ -8241,10 +8241,10 @@ static int igb_init_qav_mode(struct igb_adapter *adapter)
 	u32	txpbsize;
 	int q;
 
-	//total tx buffer size is 24KB. We allocate 20KB to queue 0, and 4K to queue 3
-	txpbsize = (8) << E1000_TXPBSIZE_TX0PB_SHIFT;
-	txpbsize |= (4) << E1000_TXPBSIZE_TX1PB_SHIFT;
-	txpbsize |= (4) << E1000_TXPBSIZE_TX2PB_SHIFT;
+	//total tx buffer size is 24KB. We allocate 12KB to queue 0, and 4K to queue 3
+	txpbsize = (12) << E1000_TXPBSIZE_TX0PB_SHIFT;
+	txpbsize |= (2) << E1000_TXPBSIZE_TX1PB_SHIFT;
+	txpbsize |= (2) << E1000_TXPBSIZE_TX2PB_SHIFT;
 	txpbsize |= (4) << E1000_TXPBSIZE_TX3PB_SHIFT;
 	txpbsize |= (4) << E1000_TXPBSIZE_OS2BMCPBSIZE_SHIFT;
 
